@@ -1,0 +1,13 @@
+tags:
+  # Integration tests against a real local Ollama. Skipped by default (CI
+  # machines have no Ollama); run them with: dart test -P ollama
+  ollama:
+    skip: "Requires local Ollama — run with: dart test -P ollama"
+
+presets:
+  # dart test -P ollama  → actually run the Ollama integration tests.
+  ollama:
+    tags:
+      ollama:
+        skip: false
+        timeout: 3m

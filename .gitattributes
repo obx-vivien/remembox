@@ -1,0 +1,14 @@
+# Publish exclusions. `git archive` (and therefore tool/release.sh and the
+# fresh public repo built from it) drops everything marked export-ignore.
+# Policy: dated, internal engineering protocols (dev-logs, experiments,
+# status hand-overs) stay in this repository's history but never ship;
+# only timeless documentation ships (docs/contract/, configuration,
+# architecture, sync, usage guide, quickstart). The maintainer's personal
+# denylist never ships either. Dated docs/ files match the globs below —
+# name new internal notes docs/dev-log-*.md or docs/<YYYY-MM-DD>-*.md.
+docs/dev-log-* export-ignore
+docs/2026-* export-ignore
+docs/experiments/ export-ignore
+docs/github-metadata.md export-ignore
+tool/release-denylist.txt export-ignore
+tool/probe/ export-ignore

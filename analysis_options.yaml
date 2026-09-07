@@ -1,0 +1,10 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    - lib/objectbox.g.dart
+
+linter:
+  rules:
+    - unawaited_futures
+    - avoid_print # stdout belongs to the MCP protocol; log via stderr sinks

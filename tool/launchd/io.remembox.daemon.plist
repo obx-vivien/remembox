@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  RememBox HTTP daemon LaunchAgent template (2026-07-18, the 2026-07-18
+  HTTP-daemon engineering log, internal; EnvironmentVariables/port/KeepAlive
+  hardened 2026-08-14, "Review round 1 fixes" section of that log).
+
+  This is a TEMPLATE: the binary path, log directory, and port placeholders
+  below (double-underscore delimited, ALL-CAPS) plus the EnvironmentVariables
+  dict placeholder are substituted by tool/install-daemon.sh before this
+  file is copied to ~/Library/LaunchAgents/io.remembox.daemon.plist. Do not
+  load this file directly from its repo path — run tool/install-daemon.sh
+  instead. (NOTE for anyone editing this comment: do not spell out the
+  EnvironmentVariables placeholder token literally here — install-daemon.sh
+  matches it with a line-oriented sed `r`/`d` pair, so a second literal
+  occurrence anywhere in this file would be corrupted too.)
+
+  A LaunchAgent does NOT inherit the operator's shell environment, so every
+  OBX_MEMORY_* variable the daemon needs (sync URL/credentials, embed model,
+  Ollama URL, dims, store dir, ...) must be baked in here at install time as
+  a captured snapshot. Daemon config is therefore FROZEN AT INSTALL TIME: to
+  change any OBX_MEMORY_* variable for the daemon, export it and re-run
+  tool/install-daemon.sh (it re-renders and reloads the LaunchAgent).
+
+  OBX_MEMORY_HTTP_TOKEN (2026-09-07, Fix 1, the 2026-09-07 daemon-auth
+  engineering log, internal) rides through this SAME generic
+  EnvironmentVariables mechanism —
+  no dedicated placeholder needed here: tool/install-daemon.sh resolves/
+  generates it and exports it into its own process BEFORE the OBX_MEMORY_*
+  capture step runs, so it is captured and baked in exactly like every other
+  OBX_MEMORY_* variable. The daemon (lib/src/http_transport.dart
+  resolveHttpToken) refuses to start without it.
+
+  RunAtLoad + KeepAlive: the daemon starts at login and launchd restarts it
+  on a genuine crash (SuccessfulExit=false), throttled to at most once every
+  ThrottleInterval seconds so a held store lock (see instance_guard.dart)
+  cannot hot-loop the process. A deliberate `kill`/SIGTERM that exits 0 does
+  NOT trigger a restart. To stop it deliberately, unload it first:
+  `launchctl bootout gui/$(id -u)/io.remembox.daemon`.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.remembox.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REMEMBOX_DIST_BIN__</string>
+        <string>--serve=__REMEMBOX_PORT__</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+__REMEMBOX_ENV_DICT__
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>__REMEMBOX_LOG_DIR__/daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REMEMBOX_LOG_DIR__/daemon.err.log</string>
+</dict>
+</plist>

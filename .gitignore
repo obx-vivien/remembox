@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Dart tooling
+.dart_tool/
+.packages
+# NOTE: pubspec.lock IS committed (this is an application — reproducible builds)
+
+# ObjectBox native C library (downloaded by tool/setup.sh — not source)
+lib/libobjectbox.*
+download/
+
+# Compiled binaries
+dist/
+
+# tool/release.sh output (built zips, never committed)
+release/
+
+# Local store data (never commit user memories)
+*.mdb
+objectbox/
+.remembox/
+
+# Sync-server dataset (device data, recreated from lib/objectbox-model.json)
+tool/sync-server/data/
+
+# NOTE: lib/objectbox-model.json and lib/objectbox.g.dart ARE committed.
+# The model JSON is schema source-of-truth (contract §1: "committed generated
+# model JSON"); objectbox-dart docs say to commit both.

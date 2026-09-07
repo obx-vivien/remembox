@@ -1,0 +1,30 @@
+name: remembox
+description: >-
+  RememBox — an MCP server giving AI assistants persistent semantic memory,
+  backed by ObjectBox with HNSW vector search. Pure Dart; stdio transport
+  (one process per client) and a streamable-HTTP singleton daemon transport
+  (one process, many concurrent sessions).
+version: 0.2.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  crypto: ^3.0.0
+  dart_mcp: ^0.5.2
+  http: ^1.2.0
+  objectbox: ^5.3.2
+  path: ^1.9.0
+  # Used by lib/src/http_transport.dart (2026-07-18, HTTP daemon mode) to
+  # bridge dart:io HttpServer request/response bodies into the in-memory
+  # StreamChannel<String> that RememboxServer/dart_mcp expects — moved here
+  # from dev_dependencies because it is now a runtime (lib/) dependency, not
+  # test-only.
+  stream_channel: ^2.1.4
+
+dev_dependencies:
+  build_runner: ^2.15.0
+  lints: ^6.1.0
+  objectbox_generator: any
+  test: ^1.25.0

@@ -1,0 +1,307 @@
+{
+  "_note1": "KEEP THIS FILE! Check it into a version control system (VCS) like git.",
+  "_note2": "ObjectBox manages crucial IDs for your object model. See docs for details.",
+  "_note3": "If you have VCS merge conflicts, you must resolve them according to ObjectBox docs.",
+  "entities": [
+    {
+      "id": "1:2753922093019415356",
+      "lastPropertyId": "15:127148419077837581",
+      "name": "MemoryEntry",
+      "flags": 2,
+      "properties": [
+        {
+          "id": "1:5998137276495998199",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:8714605510405430748",
+          "name": "title",
+          "type": 9
+        },
+        {
+          "id": "3:803064751528455510",
+          "name": "text",
+          "type": 9
+        },
+        {
+          "id": "4:6114562767293002029",
+          "name": "kind",
+          "indexId": "1:6695407565104775542",
+          "type": 9,
+          "flags": 2048
+        },
+        {
+          "id": "5:5299499767388322662",
+          "name": "sourceType",
+          "indexId": "2:4306264619070935211",
+          "type": 9,
+          "flags": 2048
+        },
+        {
+          "id": "6:3258969472086716974",
+          "name": "sourceRef",
+          "type": 9
+        },
+        {
+          "id": "7:8854298634261924805",
+          "name": "project",
+          "indexId": "3:6724621659529660681",
+          "type": 9,
+          "flags": 2048
+        },
+        {
+          "id": "8:5000295794247648737",
+          "name": "language",
+          "type": 9
+        },
+        {
+          "id": "9:8807281581976454920",
+          "name": "createdAt",
+          "type": 10
+        },
+        {
+          "id": "10:4360493814081392406",
+          "name": "lastAccessedAt",
+          "type": 10
+        },
+        {
+          "id": "11:2007667678535270428",
+          "name": "accessCount",
+          "type": 6
+        },
+        {
+          "id": "12:870592232833296638",
+          "name": "expiresAt",
+          "type": 10
+        },
+        {
+          "id": "13:3018213511540850685",
+          "name": "contentHash",
+          "indexId": "4:1462267996156037545",
+          "type": 9,
+          "flags": 34848
+        },
+        {
+          "id": "14:6603424088010615593",
+          "name": "supersededById",
+          "indexId": "5:7513943085013109540",
+          "type": 11,
+          "flags": 520,
+          "relationTarget": "MemoryEntry"
+        },
+        {
+          "id": "15:127148419077837581",
+          "name": "sourceId",
+          "indexId": "6:5334379942132061954",
+          "type": 11,
+          "flags": 520,
+          "relationTarget": "SourceDocument"
+        }
+      ],
+      "relations": [
+        {
+          "id": "1:7448594369450009005",
+          "name": "tags",
+          "targetId": "5:6277100428399743417"
+        }
+      ]
+    },
+    {
+      "id": "2:8442540122595176887",
+      "lastPropertyId": "9:3125841597604824288",
+      "name": "MemoryIndex",
+      "properties": [
+        {
+          "id": "1:2581295780267351306",
+          "name": "sourceKey",
+          "indexId": "7:1277823324181353595",
+          "type": 9,
+          "flags": 2080
+        },
+        {
+          "id": "2:8150481170717914772",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "3:3549398608600231290",
+          "name": "entryId",
+          "indexId": "8:2163736655893983303",
+          "type": 6,
+          "flags": 8
+        },
+        {
+          "id": "4:6189761969255793503",
+          "name": "embedding",
+          "indexId": "9:1062676835333584859",
+          "type": 28,
+          "flags": 8
+        },
+        {
+          "id": "5:5792508864803161819",
+          "name": "embedModel",
+          "type": 9
+        },
+        {
+          "id": "6:7099289882422483854",
+          "name": "dims",
+          "type": 6
+        },
+        {
+          "id": "7:5273557123099531262",
+          "name": "textHash",
+          "type": 9
+        },
+        {
+          "id": "8:8190667490162544558",
+          "name": "indexedAt",
+          "type": 10
+        },
+        {
+          "id": "9:3125841597604824288",
+          "name": "status",
+          "indexId": "10:3380118647509040952",
+          "type": 9,
+          "flags": 2048
+        }
+      ],
+      "relations": []
+    },
+    {
+      "id": "3:2545507982134183498",
+      "lastPropertyId": "6:3748176730761657803",
+      "name": "MemoryLink",
+      "flags": 2,
+      "properties": [
+        {
+          "id": "1:1967190804162690805",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:5923004551038784416",
+          "name": "linkType",
+          "indexId": "11:533619446839200909",
+          "type": 9,
+          "flags": 2048
+        },
+        {
+          "id": "3:3057128395146572525",
+          "name": "note",
+          "type": 9
+        },
+        {
+          "id": "4:5879066154110819026",
+          "name": "createdAt",
+          "type": 10
+        },
+        {
+          "id": "5:6885918392062295397",
+          "name": "fromId",
+          "indexId": "12:1060100212370441055",
+          "type": 11,
+          "flags": 520,
+          "relationTarget": "MemoryEntry"
+        },
+        {
+          "id": "6:3748176730761657803",
+          "name": "toId",
+          "indexId": "13:7749863860979752575",
+          "type": 11,
+          "flags": 520,
+          "relationTarget": "MemoryEntry"
+        }
+      ],
+      "relations": []
+    },
+    {
+      "id": "4:3552553862472367007",
+      "lastPropertyId": "8:3507645009887150215",
+      "name": "SourceDocument",
+      "flags": 2,
+      "properties": [
+        {
+          "id": "1:6359656691672521991",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:9147237338293996820",
+          "name": "name",
+          "type": 9
+        },
+        {
+          "id": "3:6770661623131282038",
+          "name": "pathOrUrl",
+          "type": 9
+        },
+        {
+          "id": "4:4101958671782577416",
+          "name": "author",
+          "type": 9
+        },
+        {
+          "id": "5:3301744911137607839",
+          "name": "mimeType",
+          "type": 9
+        },
+        {
+          "id": "6:8391731432788289175",
+          "name": "docCreatedAt",
+          "type": 10
+        },
+        {
+          "id": "7:2575014771323341845",
+          "name": "addedAt",
+          "type": 10
+        },
+        {
+          "id": "8:3507645009887150215",
+          "name": "contentHash",
+          "indexId": "14:4622639487341280041",
+          "type": 9,
+          "flags": 34848
+        }
+      ],
+      "relations": []
+    },
+    {
+      "id": "5:6277100428399743417",
+      "lastPropertyId": "2:2903027005535629016",
+      "name": "Tag",
+      "flags": 2,
+      "properties": [
+        {
+          "id": "1:1750504476259651994",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:2903027005535629016",
+          "name": "name",
+          "indexId": "15:4778486497830513850",
+          "type": 9,
+          "flags": 34848
+        }
+      ],
+      "relations": []
+    }
+  ],
+  "lastEntityId": "5:6277100428399743417",
+  "lastIndexId": "15:4778486497830513850",
+  "lastRelationId": "1:7448594369450009005",
+  "lastSequenceId": "0:0",
+  "modelVersion": 5,
+  "modelVersionParserMinimum": 5,
+  "retiredEntityUids": [],
+  "retiredIndexUids": [],
+  "retiredPropertyUids": [],
+  "retiredRelationUids": [],
+  "version": 1
+}
