@@ -63,7 +63,7 @@ but MCP is just the interface. RememBox is the memory layer: persistent,
 searchable by meaning, private, and under your control.
 
 The rest of this README is the technical part: how it works, a five-step
-install, the operating modes, and the security model.
+install, how sharing one store works, and the security model.
 
 ## How it works
 
@@ -82,8 +82,9 @@ install, the operating modes, and the security model.
 5. **History is kept** – corrections use `supersede`, which links the old
    entry forward instead of overwriting it; related memories get typed links.
 
-Several Claude windows can share one memory safely: `gated` mode serializes
-writes across processes, so Cowork next to Claude Code does not lose data.
+Several Claude windows can share one memory safely by default: the server
+opens the store per tool call behind a cross-process lock, so Cowork next to
+Claude Code does not lose data.
 
 ```mermaid
 flowchart LR
@@ -133,7 +134,7 @@ To build from source instead: `git clone`, then `tool/setup.sh` and
 **Register with Claude Code:**
 
 ```bash
-claude mcp add remembox --scope user -e OBX_MEMORY_STORE_MODE=gated -e OBX_LOG_LEVEL=error -- /path/to/remembox/dist/remembox
+claude mcp add remembox --scope user -- /path/to/remembox/dist/remembox
 ```
 
 **Register with Claude Desktop:** in `claude_desktop_config.json` (Settings →
@@ -142,14 +143,11 @@ quit and reopen the app:
 
 ```json
 "remembox": {
-  "command": "/path/to/remembox/dist/remembox",
-  "env": { "OBX_MEMORY_STORE_MODE": "gated", "OBX_LOG_LEVEL": "error" }
+  "command": "/path/to/remembox/dist/remembox"
 }
 ```
 
-`gated` lets several Claude windows share the store; `OBX_LOG_LEVEL=error` is
-required with it (see [Modes](#modes)). Replace `/path/to/remembox` with the
-real path.
+Replace `/path/to/remembox` with the real path.
 
 **First test:** in a new session say "Remember that my favourite project is
 X." In another new session ask "What's my favourite project?" – done.
@@ -193,19 +191,22 @@ and the session-end routine.
 | `forget` | Soft by default (expires it), `hard=true` deletes permanently. |
 | `list_recent`, `stats`, `reindex` | Newest memories; store and index health; full vector-index repair. |
 
-## Modes
+## One store, any number of windows
 
-| Mode | Store open | Several processes | Use when |
-|---|---|---|---|
-| `persistent` (default) | Process lifetime | No – a second process refuses to start | One long-running session; required for Sync |
-| `gated` | Per tool call, behind an exclusive lock | Yes, by design | More than one Claude window – **recommended**; needs `OBX_LOG_LEVEL=error` |
-| Daemon (`--serve`) | Daemon lifetime | Yes, as HTTP sessions | Sync setups or one always-on process for many clients |
+By default, several Claude windows – Claude Code, Claude Desktop, Cowork –
+can use the same memory store at the same time, with no setting required:
+the server opens the store per tool call behind a cross-process lock. If you
+set `OBX_MEMORY_SYNC_URL` to use Sync across devices, the server instead
+keeps the store open for its whole lifetime, because a live Sync connection
+needs a standing store handle – then only one process may use that store
+directory. If you want Sync *and* several windows at once, run the daemon
+(`--serve`): one always-on process every client talks to over HTTP. See
+[docs/configuration.md](docs/configuration.md) for the expert override.
 
-The most common variables: `OBX_MEMORY_STORE_MODE`, `OBX_LOG_LEVEL`,
-`OBX_MEMORY_DIR` (default `~/.remembox`), `OBX_MEMORY_EMBED_MODEL` (default
-`embeddinggemma`), `OBX_MEMORY_SYNC_URL` (unset = local only). The full list,
-including daemon caps and ranking weights, is in
-[docs/configuration.md](docs/configuration.md).
+The most common variables: `OBX_MEMORY_DIR` (default `~/.remembox`),
+`OBX_MEMORY_EMBED_MODEL` (default `embeddinggemma`), `OBX_MEMORY_SYNC_URL`
+(unset = local only). The full list, including daemon caps and ranking
+weights, is in [docs/configuration.md](docs/configuration.md).
 
 ## Security & privacy
 
@@ -224,8 +225,9 @@ a future model context.
 - **The store is owner-only on disk** (`0700`/`0600`); older stores with
   looser permissions are tightened on first open after an upgrade.
 - **Sync across devices is opt-in** via [ObjectBox Sync](https://objectbox.io/sync/)
-  against a server you run, with `persistent` mode or the daemon – see
-  [docs/sync.md](docs/sync.md) for the setup and its own auth decision.
+  against a server you run, with the store kept open for the process
+  lifetime or via the daemon – see [docs/sync.md](docs/sync.md) for the
+  setup and its own auth decision.
 
 Found a security issue? See [SECURITY.md](SECURITY.md).
 
@@ -274,8 +276,9 @@ under `~/.remembox`.
 
 **Does it work offline?** Yes, after the one-time model download.
 
-**Can two Claude windows use it at the same time?** Yes, in `gated` mode –
-that is what it is for.
+**Can two Claude windows use it at the same time?** Yes, by default – the
+server opens the store per tool call behind a cross-process lock, so no
+setting is needed.
 
 **What happens to a memory I correct?** Nothing is overwritten. `supersede`
 stores the new version and links the old one forward; `recall` returns the

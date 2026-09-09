@@ -78,10 +78,9 @@ Ordner liegt direkt in deinem Benutzerordner, also unter `~/remembox`
 
 ## Schritt 4: RememBox mit Claude verbinden
 
-Wir registrieren RememBox gleich im Modus „gated": Im Standardmodus
-verweigert ein **zweites** Claude-Fenster den Start von RememBox (nur ein
-Prozess darf den Speicher gleichzeitig halten) – im gated-Modus können
-beliebig viele Fenster ihn sich gefahrlos teilen.
+Mehrere Claude-Fenster können sich das Gedächtnis ohne zusätzliche
+Einstellung teilen – registriere RememBox einfach ganz normal, dann
+funktioniert es sofort.
 
 **Wenn du Claude Code benutzt** (Claude im Terminal):
 
@@ -89,15 +88,10 @@ Tippe im Terminal diese Zeile und drücke `Enter` – ersetze den Pfad, falls
 dein Ordner woanders liegt:
 
 ```bash
-claude mcp add remembox --scope user -e OBX_MEMORY_STORE_MODE=gated -e OBX_LOG_LEVEL=error -- ~/remembox/dist/remembox
+claude mcp add remembox --scope user -- ~/remembox/dist/remembox
 ```
 
 Das war's. Die Meldung sollte bestätigen, dass `remembox` hinzugefügt wurde.
-
-`OBX_LOG_LEVEL=error` gehört zwingend dazu, nicht optional: ohne diese
-Einstellung können im gated-Modus interne Protokollzeilen der ObjectBox-
-Bibliothek den Antwortkanal stören, und Claude wirkt dann, als würde es
-hängen – dabei ist der Eintrag ganz normal gespeichert.
 
 **Wenn du die Claude Desktop App benutzt:**
 
@@ -110,11 +104,7 @@ Trage dort Folgendes ein:
 {
   "mcpServers": {
     "remembox": {
-      "command": "/pfad/zu/remembox/dist/remembox",
-      "env": {
-        "OBX_MEMORY_STORE_MODE": "gated",
-        "OBX_LOG_LEVEL": "error"
-      }
+      "command": "/pfad/zu/remembox/dist/remembox"
     }
   }
 }
@@ -252,8 +242,9 @@ Keine Fehlermeldung ist zu banal; genau dafür ist die Seite da.
   **alle** offenen Claude-Fenster komplett und starte sie neu – bereits
   laufende Verbindungen halten sonst weiter die alte Version fest (siehe
   auch „Failed to connect" oben).
-- **Für Fortgeschrittene:** Wer regelmäßig mehrere Claude-Fenster parallel
-  offen hat oder RememBox auf mehreren Geräten teilen will, findet im
-  [README](https://github.com/obx-vivien/remembox#modes) die Abschnitte
-  „Modes" (u. a. den Daemon-Modus) und „Sync across devices" –
-  empfohlen für Fortgeschrittene, aber für den Einstieg nicht nötig.
+- **Für Fortgeschrittene:** Mehrere Claude-Fenster teilen sich das Gedächtnis
+  bereits ohne jede Einrichtung. Wer zusätzlich über Geräte hinweg
+  synchronisieren will, findet in
+  [docs/sync.md](https://github.com/obx-vivien/remembox/blob/main/docs/sync.md)
+  die Anleitung dazu – der dort beschriebene Daemon-Modus ist für alle, die
+  Sync UND mehrere Fenster gleichzeitig wollen.

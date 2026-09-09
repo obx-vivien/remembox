@@ -46,8 +46,10 @@ duplicate, fallback and exclusion is logged to stderr; tool results carry
 explicit `warnings`.
 
 For how the store itself is opened (once per process vs. once per tool
-call) and what that means operationally, see the README's
-[Modes](../README.md#modes) section.
+call, and how that is derived automatically) and what that means
+operationally, see the README's
+[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+section.
 
 ## Ranking
 

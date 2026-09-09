@@ -72,17 +72,46 @@ enum StoreMode {
   /// log (internal), F5/plan §1.2.
   gated;
 
-  static StoreMode fromEnvironment(String? raw) {
-    switch ((raw ?? 'persistent').trim().toLowerCase()) {
+  /// Resolves the effective [StoreMode] from configuration and context
+  /// (2026-09-09, store mode derived from configuration; gated is the
+  /// default).
+  ///
+  /// [explicit] is the raw `OBX_MEMORY_STORE_MODE` value — `null` or empty
+  /// means "not set". [syncUrlSet] is whether `OBX_MEMORY_SYNC_URL` is
+  /// non-empty. [serveMode] is whether `--serve` was passed on the command
+  /// line.
+  ///
+  /// - An explicit `persistent`/`gated` value is always honored as given —
+  ///   the incompatibility checks for `gated` (a non-empty
+  ///   `OBX_MEMORY_SYNC_URL`, `OBX_MEMORY_EXCLUSIVE=true`, `--serve`) still
+  ///   apply downstream, unchanged: [MemoryConfig]'s constructor for the
+  ///   first two, the `serveMode && storeMode == gated` check in
+  ///   `bin/remembox.dart`'s `main()` for the third.
+  /// - Unset/empty resolves to `persistent` when `--serve` was given OR
+  ///   `OBX_MEMORY_SYNC_URL` is set — both need a store held open for the
+  ///   process lifetime, which is exactly what `persistent` mode is.
+  ///   Otherwise it resolves to `gated`, the new default: several
+  ///   short-lived processes (one per Claude Code window) safely sharing
+  ///   one store directory, store.lock-serialized per tool call, with no
+  ///   configuration required.
+  static StoreMode resolve({
+    required String? explicit,
+    required bool syncUrlSet,
+    required bool serveMode,
+  }) {
+    switch ((explicit ?? '').trim().toLowerCase()) {
       case 'persistent':
-      case '':
         return StoreMode.persistent;
       case 'gated':
         return StoreMode.gated;
+      case '':
+        return (serveMode || syncUrlSet)
+            ? StoreMode.persistent
+            : StoreMode.gated;
       default:
         throw ArgumentError(
           'OBX_MEMORY_STORE_MODE must be "persistent" or "gated", got '
-          '"$raw".',
+          '"$explicit".',
         );
     }
   }
@@ -138,9 +167,18 @@ class MemoryConfig {
   /// should be the sole writer.
   final bool exclusive;
 
-  /// How this process holds its [Store] — see [StoreMode]. Default
-  /// `persistent` (unchanged behavior). Set via `OBX_MEMORY_STORE_MODE`.
+  /// How this process holds its [Store] — see [StoreMode]. Derived (2026-
+  /// 09-09, store mode derived from configuration; gated is the default):
+  /// `gated` unless `--serve` was given, `OBX_MEMORY_SYNC_URL` is set, or
+  /// `OBX_MEMORY_STORE_MODE` names a mode explicitly — see
+  /// [StoreMode.resolve].
   final StoreMode storeMode;
+
+  /// Whether [storeMode] came from an explicit `OBX_MEMORY_STORE_MODE`
+  /// value, as opposed to being derived from `--serve`/`OBX_MEMORY_SYNC_URL`
+  /// or defaulted. Logged once at startup (`bin/remembox.dart`) so the
+  /// operator can tell "you asked for this" apart from "this was inferred".
+  final bool storeModeExplicit;
 
   MemoryConfig({
     required this.storeDir,
@@ -155,6 +193,7 @@ class MemoryConfig {
     required this.maxTextChars,
     required this.exclusive,
     required this.storeMode,
+    required this.storeModeExplicit,
   }) {
     // 2026-09-01, the 2026-09-01 store-gate engineering log (internal),
     // (plan §1.2): gated mode opens/closes the store per request — a live
@@ -200,7 +239,17 @@ class MemoryConfig {
     }
   }
 
-  factory MemoryConfig.fromEnvironment({Map<String, String>? env}) {
+  /// [serveMode] is whether `--serve` was passed on the command line —
+  /// derived from CLI args, not the environment, so it cannot be read out
+  /// of [env]/[Platform.environment] here; callers (`bin/remembox.dart`'s
+  /// `main()`) pass their already-parsed `serveModeRequested(args)` result
+  /// through. See [StoreMode.resolve] for how it feeds the store-mode
+  /// default (2026-09-09, store mode derived from configuration; gated is
+  /// the default).
+  factory MemoryConfig.fromEnvironment({
+    Map<String, String>? env,
+    bool serveMode = false,
+  }) {
     final e = env ?? Platform.environment;
     // 2026-09-07, CLAUDE.md platform gotcha 3 / the 2026-09-02 store-gate
     // status note (internal): a rebuilt dist/ orphans a gated server's cwd
@@ -259,14 +308,22 @@ class MemoryConfig {
     final exclusiveRaw = (e['OBX_MEMORY_EXCLUSIVE'] ?? '').toLowerCase();
     final exclusive = exclusiveRaw == 'true' || exclusiveRaw == '1';
 
-    final storeMode = StoreMode.fromEnvironment(e['OBX_MEMORY_STORE_MODE']);
+    final syncUrl = e['OBX_MEMORY_SYNC_URL'] ?? '';
+    final rawStoreMode = e['OBX_MEMORY_STORE_MODE'];
+    final storeModeExplicit =
+        rawStoreMode != null && rawStoreMode.trim().isNotEmpty;
+    final storeMode = StoreMode.resolve(
+      explicit: rawStoreMode,
+      syncUrlSet: syncUrl.isNotEmpty,
+      serveMode: serveMode,
+    );
 
     return MemoryConfig(
       storeDir: e['OBX_MEMORY_DIR'] ?? p.join(home, '.remembox'),
       embedModel: e['OBX_MEMORY_EMBED_MODEL'] ?? 'embeddinggemma',
       ollamaUrl: e['OBX_MEMORY_OLLAMA_URL'] ?? 'http://localhost:11434',
       dims: dims,
-      syncUrl: e['OBX_MEMORY_SYNC_URL'] ?? '',
+      syncUrl: syncUrl,
       syncCredentials: e['OBX_MEMORY_SYNC_CREDENTIALS'] ?? '',
       rankWeightRecency: weight('OBX_MEMORY_RANK_W_RECENCY', 0.1),
       rankWeightFrequency: weight('OBX_MEMORY_RANK_W_FREQUENCY', 0.05),
@@ -274,6 +331,7 @@ class MemoryConfig {
       maxTextChars: maxTextChars,
       exclusive: exclusive,
       storeMode: storeMode,
+      storeModeExplicit: storeModeExplicit,
     );
   }
 

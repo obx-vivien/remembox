@@ -13,10 +13,20 @@
 /// This test therefore spawns the REAL entrypoint as a subprocess — slower
 /// than a unit test, but it is the only way to exercise this exact code
 /// path.
+///
+/// 2026-09-09 (store mode derived from configuration; gated is the
+/// default): also pins the new startup-mode log line and its two
+/// non-explicit branches (`gated (default)`, `persistent (--serve)`) —
+/// `main()`-level behavior for the same reason as the tests above: the
+/// branch depends on `serveModeRequested(args)` combined with
+/// `MemoryConfig`, which only exists together inside `main()`.
 library;
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
@@ -124,6 +134,205 @@ void main() {
             'the check must fire before openMemoryStore/instances.lock — '
             'no store.lock/instances.lock file should have been created',
       );
+    },
+  );
+
+  test(
+    'no OBX_MEMORY_STORE_MODE, no OBX_MEMORY_SYNC_URL, and no --serve logs '
+    'the gated (default) startup line and creates store.lock (2026-09-09, '
+    'store mode derived from configuration; gated is the default)',
+    () async {
+      final tempDir = Directory.systemTemp.createTempSync(
+        'remembox_main_gated_default_',
+      );
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final proc = await Process.start(
+        Platform.resolvedExecutable,
+        ['run', 'bin/remembox.dart'],
+        environment: {
+          'OBX_MEMORY_DIR': tempDir.path,
+          // Explicitly cleared, not merely omitted — Process.start merges
+          // into the parent environment by default (same reasoning as the
+          // OBX_MEMORY_HTTP_TOKEN override in the test above), so a shell
+          // that happens to export any of these would otherwise silently
+          // pick a different branch than the one under test.
+          'OBX_MEMORY_STORE_MODE': '',
+          'OBX_MEMORY_SYNC_URL': '',
+          // Avoids an unbounded model-pull attempt against a real Ollama
+          // if the configured embedding model happens to be missing —
+          // irrelevant to what this test checks (startup-mode resolution
+          // happens before the embedder is even constructed) but a pull
+          // could otherwise make this test slow or flaky.
+          'OBX_MEMORY_AUTO_PULL': 'false',
+        },
+      );
+      // Defensive: harmless no-op if the process already exited via the
+      // stdin-EOF shutdown path below.
+      addTearDown(() => proc.kill(ProcessSignal.sigkill));
+
+      final stderrLines = <String>[];
+      final sawTargetLine = Completer<void>();
+      const targetLine =
+          '[startup] store mode: gated (default) – several processes may '
+          'share this store; each tool call opens the store behind '
+          'store.lock';
+      final stderrSub = proc.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+            stderrLines.add(line);
+            if (line.contains(targetLine) && !sawTargetLine.isCompleted) {
+              sawTargetLine.complete();
+            }
+          });
+      // Closing stdin immediately gives the stdio channel its EOF as soon
+      // as the server attaches to it, so the process runs its normal
+      // shutdown/cleanup sequence instead of blocking on stdin forever —
+      // no MCP handshake is needed for that (server.done completes on
+      // channel close, matching a normal client disconnect).
+      unawaited(proc.stdin.close());
+
+      await sawTargetLine.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          fail(
+            'never saw the gated (default) startup line; stderr so far:\n'
+            '${stderrLines.join('\n')}',
+          );
+        },
+      );
+
+      final exitCode = await proc.exitCode.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          proc.kill(ProcessSignal.sigkill);
+          fail(
+            'process did not exit after stdin EOF; stderr so far:\n'
+            '${stderrLines.join('\n')}',
+          );
+        },
+      );
+      expect(exitCode, 0, reason: 'stderr: ${stderrLines.join('\n')}');
+
+      expect(
+        File(p.join(tempDir.path, 'store.lock')).existsSync(),
+        isTrue,
+        reason:
+            'gated mode must create store.lock during its startup probe '
+            '(StoreGate.gated) even with no tool call made — stderr: '
+            '${stderrLines.join('\n')}',
+      );
+
+      await stderrSub.cancel();
+    },
+  );
+
+  test(
+    '--serve (token set, no explicit OBX_MEMORY_STORE_MODE) logs the '
+    'persistent (--serve) startup line (2026-09-09, store mode derived '
+    'from configuration; gated is the default)',
+    () async {
+      final tempDir = Directory.systemTemp.createTempSync(
+        'remembox_main_serve_default_',
+      );
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final proc = await Process.start(
+        Platform.resolvedExecutable,
+        // --serve=0: an OS-assigned ephemeral port, so this test cannot
+        // collide with another instance (real or test) already bound to
+        // the default HTTP port.
+        ['run', 'bin/remembox.dart', '--serve=0'],
+        environment: {
+          'OBX_MEMORY_DIR': tempDir.path,
+          'OBX_MEMORY_STORE_MODE': '',
+          'OBX_MEMORY_HTTP_TOKEN': 'test-startup-log-token',
+          'OBX_MEMORY_AUTO_PULL': 'false',
+        },
+      );
+      addTearDown(() => proc.kill(ProcessSignal.sigkill));
+
+      final stderrLines = <String>[];
+      final sawTargetLine = Completer<void>();
+      const targetLine =
+          '[startup] store mode: persistent (--serve) – the daemon holds '
+          'the store for its lifetime';
+      // The mode line above prints early (right after MemoryConfig is
+      // built), well before _runServeMode installs its SIGINT/SIGTERM
+      // watchers — that only happens after the guard/store/embedder/
+      // MemoryService setup and daemon.start() have all completed. Sending
+      // SIGTERM right after the mode line races ahead of the watcher and
+      // just kills the process outright (observed: exitCode -15, no
+      // graceful cleanup). Wait for "HTTP daemon listening", logged AFTER
+      // the watchers are registered, before signaling.
+      final sawListeningLine = Completer<void>();
+      const listeningMarker = '[startup] HTTP daemon listening on';
+      final stderrSub = proc.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+            stderrLines.add(line);
+            if (line.contains(targetLine) && !sawTargetLine.isCompleted) {
+              sawTargetLine.complete();
+            }
+            if (line.contains(listeningMarker) &&
+                !sawListeningLine.isCompleted) {
+              sawListeningLine.complete();
+            }
+          });
+
+      await sawTargetLine.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          fail(
+            'never saw the persistent (--serve) startup line; stderr so '
+            'far:\n${stderrLines.join('\n')}',
+          );
+        },
+      );
+      await sawListeningLine.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          fail(
+            'never saw the HTTP daemon listening line (needed so the '
+            'SIGTERM watcher is registered before signaling); stderr so '
+            'far:\n${stderrLines.join('\n')}',
+          );
+        },
+      );
+      // ProcessSignal.watch()'s OS-level registration is itself
+      // asynchronous and completes a moment after the .listen() call
+      // returns (observed empirically: signaling immediately after the
+      // "HTTP daemon listening" line still raced ahead of it, killing the
+      // process outright with exitCode -15 instead of running the
+      // documented graceful-shutdown path). A short grace period is the
+      // pragmatic fix here — there's no externally observable "watcher is
+      // now armed" signal to synchronize on instead.
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      // Graceful shutdown, same signal the daemon documents handling
+      // (bin/remembox.dart's _runServeMode) — proves the process is a real,
+      // live daemon at this point, not something that happened to print
+      // the line and then crash.
+      proc.kill(ProcessSignal.sigterm);
+      final exitCode = await proc.exitCode.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          proc.kill(ProcessSignal.sigkill);
+          fail(
+            'daemon did not exit after SIGTERM; stderr so far:\n'
+            '${stderrLines.join('\n')}',
+          );
+        },
+      );
+      expect(exitCode, 0, reason: 'stderr: ${stderrLines.join('\n')}');
+
+      await stderrSub.cancel();
     },
   );
 }

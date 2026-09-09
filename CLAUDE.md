@@ -51,9 +51,10 @@ topic of the change), not as a link to follow. The public references are
   native ObjectBox Sync client writes its own chatter to fd 1. In `gated`
   mode (one sync client per tool call) that chatter can corrupt the stdio
   channel – `OBX_LOG_LEVEL=error` suppresses it and is required there;
-  `persistent` mode is not affected. When probing this, capture fd 1 and
-  fd 2 separately – merged, the problem is invisible. Do not "fix" it by
-  relaxing this rule.
+  `persistent` mode is not affected. The `dist/remembox` launcher sets
+  `OBX_LOG_LEVEL=error` itself, so this only bites when `bin/remembox` is
+  started directly. When probing this, capture fd 1 and fd 2 separately –
+  merged, the problem is invisible. Do not "fix" it by relaxing this rule.
 - Commit messages describe the change and its reason. No generated
   trailers, no tool attributions.
 - Keep the project name in its two places only: `pubspec.yaml` `name:` and
@@ -81,12 +82,18 @@ topic of the change), not as a link to follow. The public references are
    until restarted. Rule: after `tool/build.sh`, stop all servers
    (`pkill -f "bin/remembox"`) and restart the client sessions.
 
-## Store modes (`OBX_MEMORY_STORE_MODE`)
+## Store modes (derived; `OBX_MEMORY_STORE_MODE` overrides)
 
-| Mode | Store open | Several processes | Sync |
-|---|---|---|---|
-| `persistent` (default) | process lifetime | no – a second process refuses to start | yes |
-| `gated` | per tool call | yes – lock per call | no; refuses to start with `OBX_MEMORY_SYNC_URL` set |
+The mode is no longer something a user sets – it is derived at startup and
+logged (`[startup] store mode: gated (default) …` /
+`… persistent (OBX_MEMORY_SYNC_URL is set …) …` /
+`… persistent (--serve) …`). `OBX_MEMORY_STORE_MODE=persistent|gated` still
+exists to force one explicitly (advanced/expert use).
+
+| Mode | Store open | Several processes | Sync | Chosen when |
+|---|---|---|---|---|
+| `gated` (default) | per tool call | yes – lock per call | no; refuses to start with `OBX_MEMORY_SYNC_URL` set or with `--serve` | no `OBX_MEMORY_SYNC_URL`, no `--serve`, and not forced to `persistent` |
+| `persistent` | process lifetime | no – a second process refuses to start | yes | `OBX_MEMORY_SYNC_URL` is set, or `--serve` is used, or forced via `OBX_MEMORY_STORE_MODE=persistent` |
 
 The lock is `<storeDir>/store.lock` and it is **advisory**: a process from an
 older binary does not know it and writes past it. After every update stop

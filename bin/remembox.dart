@@ -37,8 +37,60 @@ import 'package:remembox/src/store_gate.dart';
 Future<void> main(List<String> args) async {
   void log(String message) => io.stderr.writeln(message);
 
-  final config = MemoryConfig.fromEnvironment();
+  // serveMode is computed before config: MemoryConfig.fromEnvironment needs
+  // it to resolve the store-mode default (2026-09-09, store mode derived
+  // from configuration; gated is the default — see StoreMode.resolve).
   final serveMode = serveModeRequested(args);
+  final config = MemoryConfig.fromEnvironment(serveMode: serveMode);
+
+  // 2026-09-09 (store mode derived from configuration; gated is the
+  // default): one line, right after config creation and before any
+  // store/guard work, naming which mode this process picked and why — so
+  // it is visible even when a later incompatibility check (below, or the
+  // gated+sync/gated+exclusive checks inside MemoryConfig itself) aborts
+  // startup.
+  if (config.storeModeExplicit) {
+    log(
+      '[startup] store mode: ${config.storeMode.name} '
+      '(OBX_MEMORY_STORE_MODE set explicitly)',
+    );
+  } else if (serveMode) {
+    log(
+      '[startup] store mode: persistent (--serve) – the daemon holds the '
+      'store for its lifetime',
+    );
+  } else if (config.syncUrl.isNotEmpty) {
+    log(
+      '[startup] store mode: persistent (OBX_MEMORY_SYNC_URL is set – '
+      'sync needs a standing store) – only ONE process may use this store '
+      'directory; for several windows run the daemon (--serve)',
+    );
+  } else {
+    log(
+      '[startup] store mode: gated (default) – several processes may '
+      'share this store; each tool call opens the store behind '
+      'store.lock',
+    );
+  }
+
+  // 2026-09-09 (store mode derived from configuration; gated is the
+  // default): a Dart process cannot set its own environment before the
+  // native ObjectBox library reads it (see CLAUDE.md's fd-1-chatter note),
+  // so gated mode's default OBX_LOG_LEVEL has to come from the
+  // dist/remembox launcher (tool/build.sh), not from this process. Warn
+  // once when that safety net is missing — e.g. `dart run
+  // bin/remembox.dart` invoked directly, or any client that bypasses
+  // dist/remembox — so the stdio-corruption risk is observable instead of
+  // silent (contract §8: no silent failure paths).
+  if (config.storeMode == StoreMode.gated &&
+      (io.Platform.environment['OBX_LOG_LEVEL'] ?? '').isEmpty) {
+    log(
+      '[startup] WARN: OBX_LOG_LEVEL is not set; in gated mode native '
+      'ObjectBox log lines can corrupt the MCP stdio channel – run '
+      'through dist/remembox (which sets OBX_LOG_LEVEL=error) or set it '
+      'yourself',
+    );
+  }
 
   // 2026-09-01 (Store-Gate, the 2026-09-01 store-gate engineering log
   // (internal), F5, plan §1.2): serve mode already gives one process

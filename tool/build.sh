@@ -54,6 +54,18 @@ cat > dist/remembox <<'EOF'
 # 2026-07-06 engineering log (internal), section on OBX 10098). Cap to a
 # sane value before exec.
 ulimit -n 1048576 2>/dev/null || ulimit -n 10240 2>/dev/null || true
+
+# 2026-09-09 (store mode derived from configuration; gated is the default):
+# native ObjectBox log lines go to fd 1 — the same file descriptor as the
+# MCP JSON-RPC channel — and a Dart process cannot set its own environment
+# before the native library reads it, so this default has to be set here,
+# before exec, not in Dart. "error" keeps real errors visible while
+# suppressing the routine chatter that would otherwise corrupt stdio in
+# gated mode (several processes sharing one store, each tool call opening
+# it behind store.lock). Still overridable: export OBX_LOG_LEVEL yourself
+# before invoking this launcher to see more or less.
+export OBX_LOG_LEVEL="${OBX_LOG_LEVEL:-error}"
+
 cd "$(dirname "$0")" && exec ./bin/remembox "$@"
 EOF
 chmod +x dist/remembox

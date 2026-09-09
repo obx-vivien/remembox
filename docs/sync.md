@@ -16,9 +16,13 @@ export OBX_MEMORY_SYNC_URL=ws://127.0.0.1:9997
 export OBX_MEMORY_SYNC_CREDENTIALS=...        # same secret, if set
 ```
 
-Sync needs a persistent Store handle, so it works with `persistent` mode or
-the HTTP daemon – `gated` mode refuses to start when `OBX_MEMORY_SYNC_URL` is
-set (see [Modes](../README.md#modes) in the README).
+Setting `OBX_MEMORY_SYNC_URL` automatically keeps the store open for the
+process lifetime, because a live Sync connection needs a standing store
+handle. Only one process may then use that store directory – for several
+windows at once, run the HTTP daemon instead, which every client talks to
+over HTTP (see
+[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+in the README).
 
 By default the sync server's published port is **loopback-only**
 (`127.0.0.1`), regardless of auth mode – nothing outside this machine can

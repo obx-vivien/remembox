@@ -5,6 +5,17 @@
 /// existed before this feature (only inline coverage inside
 /// memory_service_test.dart's constructor tests) — this file is scoped
 /// strictly to the two new WP1 cases, not a general config-test backfill.
+///
+/// 2026-09-09 (store mode derived from configuration; gated is the
+/// default): `StoreMode.fromEnvironment(raw)` was replaced by
+/// `StoreMode.resolve({explicit, syncUrlSet, serveMode})` — the mode is no
+/// longer read from a single environment string in isolation but derived
+/// from three inputs, with `gated` (not `persistent`) as the fallback when
+/// none of them pin it down. The groups below were rewritten against the
+/// new signature and the new default; the incompatibility-error cases
+/// (explicit `gated` + sync URL / `OBX_MEMORY_EXCLUSIVE`) are unchanged in
+/// substance, only re-pointed at `MemoryConfig.fromEnvironment`'s new
+/// `serveMode` parameter where relevant.
 library;
 
 import 'dart:io';
@@ -23,25 +34,82 @@ Map<String, String> _env({
 };
 
 void main() {
-  group('StoreMode.fromEnvironment', () {
-    test('unset / empty defaults to persistent (unchanged behavior)', () {
-      expect(StoreMode.fromEnvironment(null), StoreMode.persistent);
-      expect(StoreMode.fromEnvironment(''), StoreMode.persistent);
-    });
+  group('StoreMode.resolve', () {
+    StoreMode resolve({
+      String? explicit,
+      bool syncUrlSet = false,
+      bool serveMode = false,
+    }) => StoreMode.resolve(
+      explicit: explicit,
+      syncUrlSet: syncUrlSet,
+      serveMode: serveMode,
+    );
 
-    test('"persistent" parses to StoreMode.persistent', () {
-      expect(StoreMode.fromEnvironment('persistent'), StoreMode.persistent);
-      expect(StoreMode.fromEnvironment('Persistent'), StoreMode.persistent);
-    });
+    test(
+      'unset / empty, no sync URL, no --serve resolves to gated (the new '
+      'default, 2026-09-09 store mode derived from configuration)',
+      () {
+        expect(resolve(explicit: null), StoreMode.gated);
+        expect(resolve(explicit: ''), StoreMode.gated);
+      },
+    );
 
-    test('"gated" parses to StoreMode.gated', () {
-      expect(StoreMode.fromEnvironment('gated'), StoreMode.gated);
-      expect(StoreMode.fromEnvironment('GATED'), StoreMode.gated);
-    });
+    test(
+      'unset + a non-empty sync URL resolves to persistent (sync needs a '
+      'standing store)',
+      () {
+        expect(resolve(explicit: null, syncUrlSet: true), StoreMode.persistent);
+      },
+    );
+
+    test(
+      'unset + --serve resolves to persistent (the daemon holds the store '
+      'for its lifetime)',
+      () {
+        expect(resolve(explicit: null, serveMode: true), StoreMode.persistent);
+      },
+    );
+
+    test(
+      'unset + both a sync URL and --serve still resolves to persistent',
+      () {
+        expect(
+          resolve(explicit: null, syncUrlSet: true, serveMode: true),
+          StoreMode.persistent,
+        );
+      },
+    );
+
+    test(
+      '"persistent" parses to StoreMode.persistent regardless of context',
+      () {
+        expect(resolve(explicit: 'persistent'), StoreMode.persistent);
+        expect(resolve(explicit: 'Persistent'), StoreMode.persistent);
+        expect(
+          resolve(explicit: 'persistent', syncUrlSet: false, serveMode: false),
+          StoreMode.persistent,
+        );
+      },
+    );
+
+    test(
+      '"gated" parses to StoreMode.gated regardless of context — the '
+      'sync-URL/--serve incompatibilities are enforced downstream '
+      '(MemoryConfig\'s constructor, bin/remembox.dart\'s main()), not '
+      'inside resolve() itself',
+      () {
+        expect(resolve(explicit: 'gated'), StoreMode.gated);
+        expect(resolve(explicit: 'GATED'), StoreMode.gated);
+        expect(
+          resolve(explicit: 'gated', syncUrlSet: true, serveMode: true),
+          StoreMode.gated,
+        );
+      },
+    );
 
     test('an unknown value throws ArgumentError naming the bad value', () {
       expect(
-        () => StoreMode.fromEnvironment('turbo'),
+        () => resolve(explicit: 'turbo'),
         throwsA(
           isA<ArgumentError>().having(
             (e) => e.message,
@@ -54,15 +122,59 @@ void main() {
   });
 
   group('MemoryConfig.fromEnvironment: OBX_MEMORY_STORE_MODE', () {
-    test('defaults to StoreMode.persistent when unset', () {
-      final config = MemoryConfig.fromEnvironment(env: _env());
-      expect(config.storeMode, StoreMode.persistent);
-    });
+    test(
+      'defaults to StoreMode.gated when unset, no sync URL, no --serve '
+      '(2026-09-09 store mode derived from configuration; gated is the '
+      'new default — was StoreMode.persistent before this change)',
+      () {
+        final config = MemoryConfig.fromEnvironment(env: _env());
+        expect(config.storeMode, StoreMode.gated);
+        expect(config.storeModeExplicit, isFalse);
+      },
+    );
+
+    test(
+      'defaults to StoreMode.persistent when unset and '
+      'OBX_MEMORY_SYNC_URL is set (sync needs a standing store)',
+      () {
+        final config = MemoryConfig.fromEnvironment(
+          env: _env(syncUrl: 'ws://example:9997'),
+        );
+        expect(config.storeMode, StoreMode.persistent);
+        expect(config.storeModeExplicit, isFalse);
+      },
+    );
+
+    test(
+      'defaults to StoreMode.persistent when unset and --serve was '
+      'requested (the daemon holds the store for its lifetime)',
+      () {
+        final config = MemoryConfig.fromEnvironment(
+          env: _env(),
+          serveMode: true,
+        );
+        expect(config.storeMode, StoreMode.persistent);
+        expect(config.storeModeExplicit, isFalse);
+      },
+    );
 
     test('honors an explicit "gated" value with no other conflicts', () {
       final config = MemoryConfig.fromEnvironment(env: _env(storeMode: 'gated'));
       expect(config.storeMode, StoreMode.gated);
+      expect(config.storeModeExplicit, isTrue);
     });
+
+    test(
+      'honors an explicit "persistent" value even with no sync URL and '
+      'no --serve (explicit always wins over the derived default)',
+      () {
+        final config = MemoryConfig.fromEnvironment(
+          env: _env(storeMode: 'persistent'),
+        );
+        expect(config.storeMode, StoreMode.persistent);
+        expect(config.storeModeExplicit, isTrue);
+      },
+    );
 
     test(
       'gated + a non-empty OBX_MEMORY_SYNC_URL throws ArgumentError '

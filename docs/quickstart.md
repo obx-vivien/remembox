@@ -77,10 +77,8 @@ folder sits directly in your home folder, i.e. at `~/remembox` (the tilde
 
 ## Step 4: Connect RememBox to Claude
 
-We'll register RememBox in "gated" mode right away: in the default mode, a
-**second** Claude window is refused when it tries to start RememBox (only
-one process may hold the store at a time) – in gated mode, any number of
-windows can share it safely.
+Several Claude windows can share the same memory without any extra setting
+– register RememBox the plain way and it just works.
 
 **If you use Claude Code** (Claude in the terminal):
 
@@ -88,15 +86,10 @@ Type this line in the Terminal and press `Enter` – replace the path if
 your folder lives somewhere else:
 
 ```bash
-claude mcp add remembox --scope user -e OBX_MEMORY_STORE_MODE=gated -e OBX_LOG_LEVEL=error -- ~/remembox/dist/remembox
+claude mcp add remembox --scope user -- ~/remembox/dist/remembox
 ```
 
 That's it. The message should confirm that `remembox` was added.
-
-`OBX_LOG_LEVEL=error` is required here, not optional: without it, in gated
-mode, internal log lines from the ObjectBox library can interfere with the
-response channel, and Claude will then look like it's hanging – even
-though the entry was actually saved just fine.
 
 **If you use the Claude Desktop app:**
 
@@ -108,11 +101,7 @@ file named `claude_desktop_config.json` opens. Add the following:
 {
   "mcpServers": {
     "remembox": {
-      "command": "/path/to/remembox/dist/remembox",
-      "env": {
-        "OBX_MEMORY_STORE_MODE": "gated",
-        "OBX_LOG_LEVEL": "error"
-      }
+      "command": "/path/to/remembox/dist/remembox"
     }
   }
 }
@@ -245,8 +234,8 @@ No error message is too trivial; that's exactly what the page is for.
   replaced the `remembox` folder, fully quit **all** open Claude windows
   and restart them – otherwise already-running connections keep holding on
   to the old version (see "Failed to connect" above).
-- **For advanced users:** If you regularly have several Claude windows
-  open at once, or want to share RememBox across multiple devices, see the
-  [README](https://github.com/obx-vivien/remembox#modes)'s "Modes" section
-  (including the daemon mode) and "Sync across devices" – recommended for
-  advanced setups, but not needed to get started.
+- **For advanced users:** several Claude windows already share the memory
+  without any setup. If you want to sync across devices too, see
+  [docs/sync.md](https://github.com/obx-vivien/remembox/blob/main/docs/sync.md)
+  – the daemon mode described there is for Sync users who also want several
+  windows at once.

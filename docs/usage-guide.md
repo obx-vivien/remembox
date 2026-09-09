@@ -179,10 +179,11 @@ convenience path, the server validation is the actual guarantee.
 ## 7. Running several windows at once
 
 More than one Claude window (or Cowork alongside Claude Code or Desktop)
-can share a single store safely in `gated` mode, which serializes access
-per call instead of holding the store open for a whole session. See the
-README's [Modes](../README.md#modes) section for the trade-offs against
-`persistent` mode and the HTTP daemon.
+can share a single store safely by default: the server serializes access
+per call instead of holding the store open for a whole session, with no
+setting required. See the README's
+[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+section for the Sync exception and the HTTP daemon.
 
 ## 8. A worked day (fictional, generic)
 
