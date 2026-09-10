@@ -17,7 +17,7 @@ writing, planning and the dozens of questions that come up in a normal working
 day. Used that way, Claude is a personal assistant – and every assistant needs
 to remember things.
 
-If you work with an AI like this, you know the problem: Placeholders you need to fill yourself or keep repeating yourself to the AI:
+If you work with an AI like this, you know the problem: Placeholders you need to fill yourself or keep repeating to the AI:
 
 - What's the address again? (drafting a letter)
 - What are the bank details? (asking it to prepare a payment)
@@ -25,13 +25,13 @@ If you work with an AI like this, you know the problem: Placeholders you need to
 - Why did we decide it that way? (avoiding making the same mistake twice)
 - What's my situation, actually? (family, job, what's top of mind right now)
 
-Or Claude searches the same emails and documents again, or rebuilds the same
-spreadsheet, because the useful result of the last session is simply gone.
+Or Claude needs to repeat his work again (e.g. searches the same emails and documents,
+rebuilds the same spreadsheet, because the useful result of the last session is simply gone.
 That costs your time, burns credits, and – multiplied by millions of users –
 wastes real computing energy for work that was already done.
 
-And there is the other side: a lot of this is sensitive. Addresses, bank
-details, health notes, customer context. I don't want that in a persistent
+And there is the other side: a lot of this is sensitive, especially when combined.
+Addresses, bank details, health notes, personal notes, customer context... I don't want that in a persistent
 cloud memory. Ideally it never makes the trip to the cloud at all.
 
 Files like `CLAUDE.md`, `AGENTS.md` and skills solve a different problem:
