@@ -28,8 +28,8 @@ If you work with an AI like this, you know the problem: Placeholders you need to
 - Why did we decide it that way? (avoiding making the same mistake twice)
 - What's my situation, actually? (family, job, what's top of mind right now)
 
-Or Claude needs to repeat his work again (e.g. searches the same emails and documents,
-rebuilds the same spreadsheet, because the useful result of the last session is simply gone.
+Or Claude needs to repeat its work again (e.g. searches the same emails and documents,
+rebuilds the same spreadsheet), because the useful result of the last session is simply gone.
 That costs your time, burns credits, and – multiplied by millions of users –
 wastes real computing energy for work that was already done.
 
@@ -147,15 +147,19 @@ energy use, because it is way more efficient.
    xattr -dr com.apple.quarantine ~/remembox
    ```
 
-3. **Register it** – with Claude Code:
+3. **Register it with Claude Code, Claude Desktop, or both.** Both can use
+   the same memory at the same time, so register everywhere you use Claude.
+
+   **Claude Code** – one command in the terminal:
 
    ```bash
    claude mcp add remembox --scope user -- ~/remembox/dist/remembox
    ```
 
-   or with Claude Desktop: in `claude_desktop_config.json` (Settings →
-   Developer → Edit Config) add this block under `"mcpServers"`, using the
-   full path (no `~`), then fully quit and reopen the app:
+   **Claude Desktop** (Cowork uses the same registration) – open
+   `claude_desktop_config.json` via Settings → Developer → Edit Config, add
+   this block under `"mcpServers"` with the full path (no `~`), then fully
+   quit and reopen the app:
 
    ```json
    "remembox": {
