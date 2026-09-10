@@ -1,9 +1,8 @@
-# RememBox – your own private, local memory for Claude (and any agent tomorrow)
+# RememBox – long-term memory for your AI, owned by you
 
-**RememBox gives Claude a private, persistent memory across sessions – stored
-locally on your machine and retrieved when it is relevant. Your memory stays
-yours: it lives on your computer, works with Claude today, and can work with
-another agent tomorrow.**
+**Give your AI a long-term memory that you own and can take with you. RememBox keeps it locally on your machine, works with Claude today, and can be used by other compatible AI assistants tomorrow.**
+
+Works with Claude Code, Claude Desktop and Cowork via MCP. Built on ObjectBox with local embeddings and semantic search.
 
 [![CI](https://github.com/obx-vivien/remembox/actions/workflows/ci.yml/badge.svg)](https://github.com/obx-vivien/remembox/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/github/license/obx-vivien/remembox)](LICENSE)
@@ -11,83 +10,258 @@ another agent tomorrow.**
 [![Platform: macOS (arm64)](https://img.shields.io/badge/platform-macOS%20(arm64)-lightgrey)](#quick-start-macos-apple-silicon)
 [![Latest release](https://img.shields.io/github/v/release/obx-vivien/remembox)](https://github.com/obx-vivien/remembox/releases/latest)
 
-In a hurry? Jump to the [Quick start](#quick-start-macos-apple-silicon).
+**Jump to:** [What it remembers](#what-should-an-ai-assistant-remember) · [Memory vs. files](#why-not-just-a-markdown-file) · [The full setup](#more-than-memory-giving-your-ai-continuity) · [Privacy](#private-by-default) · [Quick start](#quick-start-macos-apple-silicon) · [Technical details](#technical-details)
+
+---
+
+RememBox is an open-source, local long-term memory for AI assistants that lets users keep and reuse their personal context across sessions and AI providers. It currently integrates with Claude via MCP and uses ObjectBox for local storage and vector search.
+
+## Your AI should not start from zero every session
+
+If you use an AI assistant regularly, you build up something valuable together: **context**. Who you are and how you work, the facts you keep needing, what is going on in your life, what you decided and why, what you already tried.
+
+Much of that disappears when a session ends – or stays inside one provider's memory system. So you repeat yourself: What's my company address again? Which account should this letter refer to? Why did we rule out the other option? Didn't we already try that? Or the AI repeats work it has already done: searching the same emails, rebuilding the same overview, rediscovering the same constraints.
+
+RememBox keeps the parts worth carrying forward **outside the AI provider, under your control**. Not every message, not the whole transcript – the useful memory of working together. If every conversation you have with AI is independent, you probably do not need it.
+
+## What should an AI assistant remember?
+
+Often, surprisingly ordinary things:
+
+| Area | Examples |
+|---|---|
+| **Practical details** | Addresses, the bank accounts you use for different purposes, contract and account information |
+| **People and living context** | Partner, children, pets, family situation, recurring responsibilities |
+| **Health context** | Conditions, limitations or goals that should change the advice you get |
+| **Goals and preferences** | What you are working toward; how you like to travel, write, work and decide |
+| **Projects and situations** | The background of a work project, a move, an insurance claim, a renovation, a trip |
+| **Decisions and reasoning** | What you decided – and, just as importantly, why |
+| **Experience and lessons** | What you tried, what worked, what failed, what should not be repeated |
+| **Useful results** | Conclusions from earlier research, documents and conversations |
+
+So when you ask *"Can you draft the letter?"*, the assistant already knows which address belongs in it. When you come back weeks later with *"Where did we leave this?"*, it recovers the previous decisions, dead ends and reasoning. The point is not to make an AI remember everything – it is to let it remember **the things a good long-term assistant would already know**.
+
+## Why not just a Markdown file?
+
+For a handful of stable facts, a Markdown file is exactly the right tool. The problem starts when one file has to be profile, current status, history, knowledge base and memory at the same time. A fact sheet can say *"Flat B: Example Street 24, 3 rooms"*. Real continuity is more than that:
+
+> We originally preferred flat A because of the garden, but after the second viewing we ruled it out because the commute would be too long.
+
+> We first tried settling the claim with the insurer directly. They rejected it, so the next step was the assessor's report.
+
+Those are **episodes, decisions and changing context**. And a growing profile file gets sent along whole with every cloud session – including addresses, bank details and health context the current task does not need. RememBox keeps the durable memory local, searches locally, and returns only what is relevant now.
+
+## More than memory: giving your AI continuity
+
+A really useful assistant needs to answer three different questions, and they belong in three different places:
+
+| Layer | Question | Good place | Examples |
+|---|---|---|---|
+| **Now** | What is going on right now? | A small local `cockpit.md` | Active projects, a move, an insurance claim, deadlines, next actions |
+| **Memory** | What should the assistant know and remember over time? | RememBox | Addresses, bank details, family and health context, goals, preferences, decisions, previous attempts |
+| **Rules** | How should the assistant work with me? | `CLAUDE.md` in Claude Code; a personal skill in Desktop and Cowork | Recall before answering, keep memory current, maintain the cockpit, supersede outdated facts |
+
+One rule cuts across all three: **sensitive personal values belong in RememBox, not in `CLAUDE.md`, skills or other standing prompt files.** Those describe *how to work*; the private values stay in the local memory layer.
+
+The cockpit is a living dashboard, a few lines per topic, overwritten as things change:
+
+```text
+HOME
+- Moving: comparing two apartments
+  Next: decide after Saturday's second viewing
+```
+
+Behind each line is a much larger body of context – the apartments, the trade-offs, what has already been tried – and that is what RememBox holds. Every memory belongs to a **project or topic** (`personal`, `finance`, `moving`, a work project), and recall searches within that scope, so unrelated parts of your life stay out of the current conversation.
+
+The rules turn this into a habit the assistant keeps on its own: recall before substantive work, capture decisions and dead ends while working, store conclusions and update the cockpit afterwards. The supplied skill contains the basic loop; the [usage guide](docs/usage-guide.md) has the complete system and the daily practice I use.
+
+## What it feels like in practice
+
+On Monday you compare two apartments for a possible move; the addresses, trade-offs and open next step become part of its RememBox memory. Later that week a positioning decision on a business project is stored with its reasoning. Then an insurance claim: the next action goes into the cockpit, the case history into RememBox.
+
+Weeks later, in a fresh session: *"What do I currently need to take care of?"* – the cockpit answers. *"Why had we ruled out the first apartment again?"* – RememBox retrieves the decision and its reasoning. *"Draft the follow-up to the insurer."* – the assistant already has the claim history and the practical details.
+
+Different questions need different kinds of continuity; a small current-state file, long-term memory and standing rules give the assistant all three.
+
+## RememBox is not "chat with your documents"
+
+Documents are sources; they tell an assistant what a file says. RememBox remembers **what you and your assistant learned, decided and established while working together**. A document may contain 80 pages; the durable memory might simply be *"Contract X renews automatically on 31 March unless cancelled three months earlier."* Later, the assistant retrieves that conclusion without re-reading the contract.
+
+## Private by default
+
+Addresses, finances, health, family and customer history may each be ordinary; put together they form a detailed picture of your life. RememBox therefore keeps the memory layer local: database, embeddings and search stay on your machine, there is no RememBox account or telemetry, and cross-device Sync goes only to a server you configure.
+
+One boundary matters: **the AI you use may still be a cloud service.** When Claude recalls a memory, that returned text becomes part of the conversation and is sent to Anthropic like other prompt content. The privacy claim is selective disclosure, not "Claude never sees your memory": **your complete accumulated memory does not have to live in the provider's cloud or be sent as standing context every time.** Details: [What goes to the cloud](#what-goes-to-the-cloud--and-what-never-does).
+
+## Your memory stays yours – even if your AI changes
+
+Provider memory is convenient, but the more useful it becomes, the harder it is to leave. RememBox separates **the memory** from **the model using it**: the database lives on your disk and is exposed through [MCP](https://modelcontextprotocol.io), a standard interface between AI applications and tools. I use it with Claude Code, Claude Desktop and Cowork today; another compatible AI can use the same accumulated context later.
+
+**The AI is replaceable. Your memory is an asset you keep.**
 
 ## Why I built it
 
-I use Claude a lot: Claude Code for development, Claude Desktop for research,
-writing, planning and the dozens of questions that come up in a normal working
-day. Used that way, Claude is a personal assistant – and every assistant needs
-to remember things.
+I use Claude a lot: Claude Code for development, Claude Desktop and Cowork for research, writing, planning and the dozens of questions of a normal day. Used that way, Claude behaves like an assistant or co-worker – and a good assistant should not need to be briefed from scratch every morning.
 
-If you work with an AI like this, you know the problem: Placeholders you need to fill yourself or keep repeating to the AI:
+I did not want that accumulated memory to belong to one AI provider, and I did not want one giant profile file shipped as context over and over again. So I built RememBox: a local long-term memory layer plus a simple practice for keeping current state, history and rules in the right places. Built for myself, with [ObjectBox](https://objectbox.io/) underneath and a lot of AI-assisted coding on top; I use it every day.
 
-- What's the address again? (drafting a letter)
-- What are the bank details? (asking it to prepare a payment)
-- What did we last decide about that project? (jumping between projects)
-- Why did we decide it that way? (avoiding making the same mistake twice)
-- What's my situation, actually? (family, job, what's top of mind right now)
+## How RememBox itself works – the simple version
 
-Or Claude needs to repeat its work again (e.g. searches the same emails and documents,
-rebuilds the same spreadsheet), because the useful result of the last session is simply gone.
-That costs your time, burns credits, and – multiplied by millions of users –
-wastes real computing energy for work that was already done.
+1. **Something worth keeping comes up** – a fact, decision, preference, lesson or reference.
+2. **RememBox stores it locally**, together with what is needed to search it.
+3. **A later session asks** for memories relevant to the current topic.
+4. **RememBox searches by meaning** – "why did we reject that option?" finds the decision even if it was phrased differently.
+5. **Only the relevant memories are returned**, not your whole history.
+6. **The history evolves** – memories are corrected, superseded and linked, never silently overwritten.
 
-And there is the other side: a lot of this is sensitive, especially when combined.
-Addresses, bank details, health notes, personal notes, customer context... I don't want that in a persistent
-cloud memory. Ideally it never makes the trip to the cloud at all.
+Implementation details: [Technical details](#technical-details).
 
-Files like `CLAUDE.md`, `AGENTS.md` and skills solve a different problem:
-they are great for standing instructions and reusable workflows, but they are
-not memory, and they get sent along as context every time (!)
+## A web of memories, not a pile of notes
 
-So I built RememBox: a local-first long-term memory for Claude. It stores
-facts, decisions, preferences and episodes on your machine, retrieves them by
-meaning when they matter, and hands Claude only the memories the current task
-needs. Storage, embeddings and search all run locally.
+Memories relate to each other: a decision points to the research behind it, a correction replaces an old fact without deleting the history, a failed attempt stays attached to its project so another session does not repeat it. Over time RememBox becomes a small private knowledge graph – a normal database on your disk, yours to inspect, back up, export or query.
 
-I built it for myself, with ObjectBox underneath and a lot of AI-assisted
-coding on top, and I use it every day. It turned out useful for me. So I want
-to share it – including the setup that turns Claude into an efficient
-all-round assistant and co-worker (see [docs/usage-guide.md](docs/usage-guide.md)).
+**Next on the roadmap:** structured personal data alongside free-form memories – typed records such as a property, contract or account with exact field queries, so *"What is the monthly rent for X?"* returns the stored value instead of re-reading the contract.
 
-## Your memory stays yours
+---
 
-The memory is a database on your disk that you control. It is not
-Claude-specific: the same store can serve another agent or model later, so
-your accumulated context – facts, decisions, preferences, history – is not
-locked into one assistant, one account or one vendor's memory feature. The
-more it grows, the more valuable it gets for you, and it keeps growing only for you - to use as you please.
+## Quick start (macOS, Apple Silicon)
 
-**The agent can change. Your memory doesn't have to.**
+The current prebuilt release targets macOS on Apple Silicon.
 
-Technically, RememBox is an [MCP](https://modelcontextprotocol.io) server for [ObjectBox](https://objectbox.io/) –
-but MCP is just the interface. RememBox is the memory layer: persistent,
-searchable by meaning, private, and under your control.
+### 1. Install Ollama
 
-The rest of this README is the technical part: how it works, a five-step
-install, how sharing one store works, and the security model.
+Install [Ollama](https://ollama.com) and download the local embedding model:
 
-## How it works
+```bash
+ollama pull embeddinggemma
+```
 
-1. **`remember`** – Claude stores a memory with a kind (`fact`, `decision`,
-   `preference`, `episode`, `reference`) and a `project` scope. Duplicates
-   are detected on the normalized text.
-2. **Embed locally** – a local [Ollama](https://ollama.com) model turns the
-   text into a vector. No network call leaves your machine.
-3. **Store** – memory and vector go into an embedded
-   [ObjectBox](https://objectbox.io) database in one transaction.
-4. **`recall` by meaning** – a later question is embedded the same way and
-   matched with ObjectBox's built-in HNSW nearest-neighbour search, filtered
-   by `project`, ranked by similarity plus small recency and frequency boosts.
-   Ask "what did we decide about the database?" weeks later, in other words,
-   and it still finds "chose SQLite over Postgres because …".
-5. **History is kept** – corrections use `supersede`, which links the old
-   entry forward instead of overwriting it; related memories get typed links.
+### 2. Download RememBox
 
-Several Claude windows can share one memory safely by default: the server
-opens the store per tool call behind a cross-process lock, so Cowork next to
-Claude Code does not lose data.
+Download the [latest release](https://github.com/obx-vivien/remembox/releases/latest) and unzip it somewhere permanent, for example:
+
+```text
+~/remembox
+```
+
+Do not leave it in the Downloads folder.
+
+If macOS refuses to open it because it is from an "unidentified developer", clear the quarantine flag once for the whole folder:
+
+```bash
+xattr -dr com.apple.quarantine ~/remembox
+```
+
+### 3. Connect it to Claude
+
+You can use the same memory from Claude Code, Claude Desktop, or both.
+
+#### Claude Code
+
+Run:
+
+```bash
+claude mcp add remembox --scope user -- ~/remembox/dist/remembox
+```
+
+#### Claude Desktop / Cowork
+
+Open `claude_desktop_config.json` via:
+
+**Settings → Developer → Edit Config**
+
+Add this block under `"mcpServers"`, using the full path rather than `~`:
+
+```json
+"remembox": {
+  "command": "/path/to/remembox/dist/remembox"
+}
+```
+
+Then fully quit and reopen Claude Desktop.
+
+### 4. Test it
+
+In a new session, say:
+
+> Remember that my favourite project is X.
+
+Then open another new session and ask:
+
+> What's my favourite project?
+
+That's it.
+
+Every memory needs a `project` so memories stay scoped to the right topic. If Claude does not know the project, tell it – or install the RememBox skill below, which teaches Claude the normal recall / remember workflow.
+
+New to the terminal? [docs/quickstart.md](docs/quickstart.md) walks through every step, including Gatekeeper and Ollama troubleshooting. There is also a [German version](docs/quickstart.de.md).
+
+### Other platforms: build from source
+
+Intel Macs and Linux are currently untested. The launcher and library loading are intended to support them, so building from source is the way to try.
+
+With Dart SDK ≥ 3.10 installed:
+
+```bash
+git clone https://github.com/obx-vivien/remembox.git
+cd remembox
+tool/setup.sh   # dependencies + ObjectBox library + code generation
+tool/build.sh   # produces the same self-contained dist/ folder
+```
+
+Then register `dist/remembox` exactly as in step 3 above.
+
+## Make it part of the assistant's normal workflow
+
+Installing RememBox gives the AI access to persistent memory.
+
+The supplied skill turns that access into a **memory practice**: the assistant is instructed to recall context proactively and keep the memory current as part of normal work, without waiting for you to say "remember this" every time.
+
+Install it with:
+
+```bash
+mkdir -p ~/.claude/skills/remembox-memory
+cp ~/remembox/skill/SKILL.md ~/.claude/skills/remembox-memory/SKILL.md
+```
+
+That installs it for Claude Code, where the same principles can also live in a global `CLAUDE.md`. In Claude Desktop and Cowork, add the same file as a personal skill through the app's skill settings – those surfaces do not read `CLAUDE.md`.
+
+The important rules are simple:
+
+- **Recall first** when previous context could change the answer.
+- **Scope memories by `project` or topic** so unrelated context stays separate.
+- **Remember durable conclusions**, not whole transcripts.
+- **Store decisions with reasoning** as `decision` entries.
+- **Remember dead ends** as `episode` entries so they are not rediscovered.
+- **Add dated status snapshots** as `fact` entries tagged `status` when a project reaches a meaningful new state.
+- **Supersede stale facts** instead of accumulating contradictions.
+- **Link related memories** when the relationship is useful later.
+- **Keep the cockpit current** when a topic's status or next action changes.
+- **Keep sensitive values in RememBox**, not in `CLAUDE.md` or Skills.
+- **Keep rules, current operational state and durable knowledge separate** so each has one clear source of truth.
+
+The [usage guide](docs/usage-guide.md) contains the concrete setup, including the global `CLAUDE.md` snippet, the personal skill for Desktop and Cowork, the cockpit pattern and the session-end routine.
+
+---
+
+<a id="technical-details"></a>
+# Technical details
+
+Everything below is the implementation and operational side of RememBox. You do not need to understand it to understand the product, but it is intentionally documented here for people who want to know exactly how the memory works.
+
+## Technical architecture
+
+Technically, RememBox is an [MCP](https://modelcontextprotocol.io) server backed by [ObjectBox](https://objectbox.io/).
+
+MCP is the interface. ObjectBox is the embedded database and vector-search engine. RememBox is the memory layer built on top.
+
+### The memory path
+
+1. **`remember`** – Claude stores a memory with a kind (`fact`, `decision`, `preference`, `episode`, `reference`) and a required `project` scope. Duplicates are detected on normalized text.
+2. **Embed locally** – a local [Ollama](https://ollama.com) model turns the text into a vector. No remote embedding API is used.
+3. **Store** – memory and vector go into an embedded ObjectBox database in one transaction.
+4. **`recall` by meaning** – a later query is embedded the same way and matched using ObjectBox's built-in HNSW nearest-neighbour search, filtered by project and ranked by semantic similarity with small recency and frequency boosts.
+5. **Keep history** – corrections use `supersede`, which links the old entry forward instead of overwriting it. Related memories can use typed links.
 
 ```mermaid
 flowchart LR
@@ -99,245 +273,214 @@ flowchart LR
     S --> H["ranked results, by meaning"]
 ```
 
-## A web of memories, not a pile of notes
+### Memory relationships
 
-Memories are not isolated rows. RememBox stores them as typed entities in
-ObjectBox with real relations between them: every memory can be linked to
-others with a typed edge – `parent`, `child`, `related`, `contradicts`,
-`derivedFrom` – and every `supersede` adds a forward link from the old
-version to the new one. `recall` and `get` return those edges with each hit,
-so Claude sees not just the fact but its neighbourhood: the decision this
-fact came from, the note it contradicts, the source document it cites, the
-project it belongs to. Over time that becomes a small private knowledge
-graph that grows with every session – and because it is a normal database
-on your disk, it is yours to inspect, back up, export or query directly.
+Memories are stored as typed entities, not isolated text rows.
 
-Next on the roadmap is structured data alongside free text: typed records
-(think property, contract, account) with exact field queries, so questions
-like "what is the monthly rent for X" get an exact answer from your own
-data instead of a fresh search. This means: 1. less searches, less costs
-2. less data sharing (only the number, not the whole contract) 3. less
-energy use, because it is way more efficient.
+Every memory can be linked to others with typed relationships:
+
+- `parent`
+- `child`
+- `related`
+- `contradicts`
+- `derivedFrom`
+
+Every `supersede` also adds a forward link from the old version to the new one.
+
+`recall` and `get` return those relationships with a hit, so the assistant can receive not only a fact but relevant context around it: the decision it came from, a note it contradicts, its source, or related project history.
 
 ## Design decisions
 
 | Decision | Why |
 |---|---|
-| **ObjectBox, not a SQL database plus a vector store** | One embedded database holds the typed entities, their relations *and* the HNSW vector index. No second system to run, no server, no config. Opening the store costs about half a millisecond, so it can be opened per tool call. |
-| **Entities are the truth, the vector index is a cache** | Memories, links, tags and sources are real objects with relations. The 768-dimension index references them and can be rebuilt any time with `reindex` – you never lose data to an embedding-model change. |
-| **Embeddings on your machine** | A local Ollama model turns text into vectors. No API key, no usage meter, and nothing leaves the machine to make memory searchable. |
-| **One self-contained folder** | A compiled Dart binary with the native library next to it. Nothing to install besides Ollama; the whole memory lives in one directory you can copy or back up. |
-| **Explicit forgetting, no decay** | Memories don't fade on a score. `forget` expires or deletes on request, `recall` ranks by meaning with small recency and frequency boosts – you decide what disappears. |
-| **Sync is opt-in and self-hosted** | Your memory replicates only to a server you run, and only if you switch it on. |
-
-## Quick start (macOS, Apple Silicon)
-
-1. **Install [Ollama](https://ollama.com)** and pull the embedding model:
-
-   ```bash
-   ollama pull embeddinggemma
-   ```
-
-2. **Download the [latest release](https://github.com/obx-vivien/remembox/releases/latest)**
-   and unzip it somewhere permanent, e.g. `~/remembox` – not your Downloads
-   folder. If macOS refuses to open it ("unidentified developer"), clear the
-   quarantine flag once for the whole folder:
-
-   ```bash
-   xattr -dr com.apple.quarantine ~/remembox
-   ```
-
-3. **Register it with Claude Code, Claude Desktop, or both.** Both can use
-   the same memory at the same time, so register everywhere you use Claude.
-
-   **Claude Code** – one command in the terminal:
-
-   ```bash
-   claude mcp add remembox --scope user -- ~/remembox/dist/remembox
-   ```
-
-   **Claude Desktop** (Cowork uses the same registration) – open
-   `claude_desktop_config.json` via Settings → Developer → Edit Config, add
-   this block under `"mcpServers"` with the full path (no `~`), then fully
-   quit and reopen the app:
-
-   ```json
-   "remembox": {
-     "command": "/path/to/remembox/dist/remembox"
-   }
-   ```
-
-4. **Test it**: in a new session say "Remember that my favourite project is
-   X." In another new session ask "What's my favourite project?" – done.
-
-Every memory needs a `project`; `recall` filters by project only (tags are
-labels, not a filter), so the server rejects a `remember` without one. If
-Claude doesn't know the project, tell it, or install the skill below, which
-sets it.
-
-New to the terminal? [docs/quickstart.md](docs/quickstart.md) walks through
-every step, including Gatekeeper and Ollama troubleshooting
-([German version](docs/quickstart.de.md)).
-
-### Other platforms: build from source
-
-Intel Macs and Linux are untested; the launcher and library loading are
-written to support them, so building from source is the way to try. With the
-Dart SDK ≥ 3.10 installed:
-
-```bash
-git clone https://github.com/obx-vivien/remembox.git
-cd remembox
-tool/setup.sh   # dependencies + ObjectBox library + code generation
-tool/build.sh   # produces the same self-contained dist/ folder
-```
-
-Then register `dist/remembox` exactly as in step 3 above.
-
-## Use it from Claude Code, Claude Desktop and Cowork
-
-RememBox is a standard MCP server, so all three use the same registration.
-The skill shipped in the ZIP teaches Claude the loop – recall relevant
-memories before planning, store decisions and facts after finishing –
-without being asked:
-
-```bash
-mkdir -p ~/.claude/skills/remembox-memory
-cp ~/remembox/skill/SKILL.md ~/.claude/skills/remembox-memory/SKILL.md
-```
-
-[docs/usage-guide.md](docs/usage-guide.md) shows how I run it day to day:
-the global `CLAUDE.md` snippet, a personal skill for Desktop and Cowork,
-and the session-end routine.
+| **ObjectBox instead of a SQL database plus a separate vector store** | One embedded database holds the typed entities, their relations and the HNSW vector index. No second system needs to run. |
+| **Entities are the truth; the vector index is rebuildable** | Memories, links, tags and sources are real objects. The vector index references them and can be rebuilt with `reindex`, so an embedding-model change does not redefine the underlying memory. |
+| **Embeddings run locally** | Ollama turns text into vectors on the user's machine. No embedding API key, remote embedding request or usage meter is required. |
+| **One self-contained folder** | The compiled Dart binary and native library live together. Apart from Ollama, there is no separate database server to install. |
+| **Explicit forgetting, no automatic decay** | Memories do not disappear because an opaque score fell below a threshold. `forget` expires or deletes them explicitly; ranking uses meaning plus small recency and frequency boosts. |
+| **Sync is opt-in and self-hosted** | The memory replicates only if Sync is explicitly configured, and only to the configured server. |
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `remember` | Store a memory with kind, tags, `project` (required) and source. Dedupes; oversized input is rejected, never truncated. |
+| `remember` | Store a memory with kind, tags, required `project` and source. Deduplicates; oversized input is rejected rather than truncated. |
 | `recall` | Semantic search over memories, filterable by project, kind and source type. Expired and superseded entries are excluded by default. |
-| `get` | One memory by id, with tags, source and links. |
-| `supersede` | Replace a memory with a corrected one; the old entry stays, linked forward. |
-| `link` / `unlink` | Typed edges between memories (`parent`, `child`, `related`, `contradicts`, `derivedFrom`). |
-| `forget` | Soft by default (expires it), `hard=true` deletes permanently. |
-| `list_recent`, `stats`, `reindex` | Newest memories; store and index health; full vector-index repair. |
+| `get` | Retrieve one memory by ID, including tags, source and links. |
+| `supersede` | Replace a memory with a corrected version while preserving and linking the old one. |
+| `link` / `unlink` | Create or remove typed relationships between memories. |
+| `forget` | Soft-forget by default; `hard=true` deletes permanently. |
+| `list_recent` | Show recent memories. |
+| `stats` | Inspect store and index health. |
+| `reindex` | Rebuild the vector index. |
 
-## One store, any number of windows
+## Project scope
 
-By default, several Claude windows – Claude Code, Claude Desktop, Cowork –
-can use the same memory store at the same time, with no setting required:
-the server opens the store per tool call behind a cross-process lock. If you
-set `OBX_MEMORY_SYNC_URL` to use Sync across devices, the server instead
-keeps the store open for its whole lifetime, because a live Sync connection
-needs a standing store handle – then only one process may use that store
-directory. If you want Sync *and* several windows at once, run the daemon
-(`--serve`): one always-on process every client talks to over HTTP. See
-[docs/configuration.md](docs/configuration.md) for the expert override.
+Every stored memory requires a `project`.
 
-The most common variables: `OBX_MEMORY_DIR` (default `~/.remembox`),
-`OBX_MEMORY_EMBED_MODEL` (default `embeddinggemma`), `OBX_MEMORY_SYNC_URL`
-(unset = local only). The full list, including daemon caps and ranking
-weights, is in [docs/configuration.md](docs/configuration.md).
+This is the technical mechanism behind the user-facing topic scopes described above. Project scope is the main way RememBox prevents unrelated memories from bleeding into each other's searches.
 
-## Security & privacy
+`recall` can filter by:
 
-Threat model: one user, one machine, whose stored memories get replayed into
-a future model context.
+- `project`
+- `kind`
+- `sourceType`
 
-- **Local only by default.** Without `OBX_MEMORY_SYNC_URL`, nothing listens
-  on the network; the only channel is the stdio pipe your client spawns.
-- **The daemon binds to `127.0.0.1`, requires a bearer token and checks
-  `Origin`/`Host`**, so a browser tab cannot call it. Never expose it beyond
-  loopback.
-- **Recalled text is data, not instructions.** Every hit carries a
-  provenance note; entries from URLs or files are flagged `externallySourced`.
-- **All tool arguments are validated and length-capped**; bad input is
-  rejected with an explicit error, never truncated or executed.
-- **The store is owner-only on disk** (`0700`/`0600`); older stores with
-  looser permissions are tightened on first open after an upgrade.
-- **Sync across devices is opt-in** via [ObjectBox Sync](https://objectbox.io/sync/)
-  against a server you run, with the store kept open for the process
-  lifetime or via the daemon – see [docs/sync.md](docs/sync.md) for the
-  setup and its own auth decision.
+Tags are labels, not a recall filter.
+
+The supplied skill teaches Claude to set project names consistently. The server also validates this itself so the rule does not depend only on prompt compliance.
+
+## One store, multiple Claude windows
+
+By default, several Claude windows – Claude Code, Claude Desktop and Cowork – can use the same memory store at the same time.
+
+In the default local mode, the server opens the store per tool call behind a cross-process lock rather than keeping the database open for the lifetime of a Claude session.
+
+If `OBX_MEMORY_SYNC_URL` is configured, the server instead keeps the store open because a live Sync connection needs a standing store handle. In that mode, only one process may use the store directory directly.
+
+If you need both Sync and several clients at once, run RememBox as a daemon with:
+
+```text
+--serve
+```
+
+One always-on process owns the store and clients talk to it over local HTTP.
+
+See [docs/configuration.md](docs/configuration.md) for the expert options.
+
+Common variables include:
+
+- `OBX_MEMORY_DIR` – default `~/.remembox`
+- `OBX_MEMORY_EMBED_MODEL` – default `embeddinggemma`
+- `OBX_MEMORY_SYNC_URL` – unset means local only
+
+The full configuration, including daemon caps and ranking weights, is documented in [docs/configuration.md](docs/configuration.md).
+
+## Security model
+
+Threat model: one user, one machine, with stored memories potentially replayed into a future model context.
+
+- **Local only by default.** Without `OBX_MEMORY_SYNC_URL`, nothing listens on the network; the normal channel is the stdio pipe spawned by the client.
+- **The daemon binds to `127.0.0.1`.** It requires a bearer token and checks `Origin` / `Host`. Do not expose it beyond loopback.
+- **Recalled text is data, not instructions.** Every hit carries provenance information; entries originating in URLs or files are marked `externallySourced`.
+- **Tool arguments are validated and length-capped.** Bad input is rejected explicitly rather than truncated or executed.
+- **The store is owner-only on disk** (`0700` / `0600`). Older stores with looser permissions are tightened on first open after an upgrade.
+- **Cross-device Sync is opt-in** via [ObjectBox Sync](https://objectbox.io/sync/) against a server you run.
+
+See [docs/sync.md](docs/sync.md) for Sync setup and its authentication model.
 
 Found a security issue? See [SECURITY.md](SECURITY.md).
 
 ## What goes to the cloud – and what never does
 
-RememBox keeps the memory local, but Claude itself is a cloud model. Being
-precise about the boundary matters more than any slogan:
+RememBox keeps the memory layer local, but the AI application using it may be cloud-based. With Claude, the boundary is:
 
-- **Never leaves your machine:** the database, the embeddings, and every
-  memory that is *not* recalled for the current task. Embedding and search
-  run locally in Ollama and ObjectBox; there is no RememBox account, server
-  or telemetry.
-- **Goes to Anthropic like any other prompt:** the text of a `recall` query
-  and the handful of memories it returns (they become part of the
-  conversation context), and anything Claude chooses to `remember` (it was
-  in the conversation anyway). RememBox limits this to the memories relevant
-  now, instead of shipping a whole knowledge base as context every time.
-- **How long it stays there is your account setting, not RememBox's.** What
-  Anthropic retains from your conversations, and whether it may be used to
-  train models, depends on your plan and on the privacy settings of your
-  Claude account – and those defaults have changed over time. Check them
-  rather than assume.
+### Stays on your machine
 
-Setup recommendation, if you want to maximise privacy:
+- the RememBox database
+- embeddings
+- the vector index
+- memories that are not recalled for the current task
+- local search itself
 
-1. **Put memory in RememBox, not in files that are sent along.** Keep
-   `CLAUDE.md` and skills for instructions and workflows; keep facts,
-   decisions, people and history in RememBox, where only the relevant
-   pieces are retrieved.
-2. **Review your Claude privacy settings once:** the model-training: opt-out otherwise this data will be rettained for a very loooong time (!), the data-retention period that comes with it, and any
-   built-in memory feature of the app. If you want RememBox to be the one
-   memory you control, really consider switching the app's own memory off. It comes with the drawback that you only have memory on your local machine (though you can opt to sync your Objectbox database to your mobile or other devices, not  to the Claude cloud backend though...).
-3. **Delete conversations you don't need.** The durable record is in
-   RememBox on your disk; the chat transcript in the cloud can go.
-4. **Scope by `project`** – a `privat` or `finance` project keeps sensitive
-   memories out of unrelated recalls, so they are only ever sent when that
-   context is actually the topic.
-5. **Sync only to a server you run**, if at all – see
-   [docs/sync.md](docs/sync.md).
+Embedding and search run locally using Ollama and ObjectBox.
+
+RememBox has no account, hosted backend or telemetry.
+
+### Goes to Claude / Anthropic when used
+
+When Claude calls `recall`, the query and the handful of returned memories become part of the conversation context.
+
+Anything Claude chooses to store with `remember` was also part of the active conversation before it was stored.
+
+RememBox therefore does **not** make a cloud AI local. It limits the amount of persistent personal context that needs to be stored remotely or supplied wholesale to every conversation.
+
+How Anthropic retains conversation data, and whether it may be used for model training, depends on the user's plan and current Anthropic privacy settings. Those policies can change, so check the current settings rather than relying on assumptions.
+
+### Privacy-oriented setup
+
+If you want to maximize the separation between local memory and cloud context:
+
+1. **Keep durable memory in RememBox rather than instruction files.** Use `CLAUDE.md` and skills for instructions and workflows; use RememBox for facts, decisions, people and history.
+2. **Review Claude's privacy and retention settings.** Decide whether you want the application's own built-in memory in addition to RememBox.
+3. **Delete cloud conversations you no longer need** if that matches your retention needs. The durable conclusions can remain in RememBox.
+4. **Use meaningful project scopes** such as `private`, `finance` or a project name so unrelated memories are not retrieved into unrelated conversations.
+5. **Configure Sync only if you want it**, and only to a server you control.
 
 ## FAQ
 
-**Does my data leave my machine?** No, unless you configure Sync against
-your own server. Embeddings and search run locally; the store is a file
-under `~/.remembox`.
+### Does my data leave my machine?
 
-**Does it work offline?** Yes, after the one-time model download.
+**The RememBox database, embeddings and local search do not.** RememBox does not upload them to its own cloud service.
 
-**Can two Claude windows use it at the same time?** Yes, by default – the
-server opens the store per tool call behind a cross-process lock, so no
-setting is needed.
+However, if you use RememBox with Claude, any memories returned by `recall` become part of the Claude conversation and are sent to Anthropic like other prompt context.
 
-**What happens to a memory I correct?** Nothing is overwritten. `supersede`
-stores the new version and links the old one forward; `recall` returns the
-current one, `get` still shows the history.
+That distinction is intentional: the whole memory stays local; only relevant retrieved pieces are supplied to the assistant when needed.
 
-**Can I change the embedding model?** Yes, via `OBX_MEMORY_EMBED_MODEL`; a
-different dimension count needs `OBX_MEMORY_DIMS` and a `reindex`.
+### Does RememBox work offline?
 
-**How do I remove it?** Unregister it (`claude mcp remove remembox -s user`,
-or delete the block from `claude_desktop_config.json`), delete the unzipped
-folder, and delete `~/.remembox` if you also want the memories gone.
+The local memory database, embedding model and search work offline after the one-time model download.
 
-**Is it an official ObjectBox product?** No – an independent open-source
-project (Apache-2.0) and a showcase of ObjectBox usage.
+Of course, a cloud-based assistant such as Claude still needs whatever connectivity its own application requires.
 
-## Architecture, status, contributing
+### Can two Claude windows use it at the same time?
 
-Typed domain entities (`MemoryEntry`, `SourceDocument`, `MemoryLink`, `Tag`)
-are the source of truth; one `MemoryIndex` entity carries the HNSW vector
-index, and retrieval hydrates the entities after the nearest-neighbour
-search. Details, ranking formula and development notes:
-[docs/architecture.md](docs/architecture.md); the ObjectBox rules the code
-binds itself to: [docs/contract/](docs/contract/).
+Yes, in the default local configuration. RememBox serializes access per call, so Claude Code, Desktop and Cowork can share one store without an extra setting.
 
-RememBox is used daily by its author and actively developed, not yet 1.0:
-the ranking formula and some defaults will keep moving, the storage schema
-and tool contracts are stable and versioned. Issues and pull requests are
-welcome – [CLAUDE.md](CLAUDE.md) holds the engineering rules, and
-[SECURITY.md](SECURITY.md) explains how to report a security issue.
+The Sync configuration is different; see [One store, multiple Claude windows](#one-store-multiple-claude-windows).
+
+### What happens when I correct a memory?
+
+`supersede` stores the corrected version and links the old memory forward.
+
+Normal recall returns the current version, while the historical record remains available.
+
+### Can I change the embedding model?
+
+Yes, via `OBX_MEMORY_EMBED_MODEL`.
+
+If the replacement model uses a different vector dimension, set `OBX_MEMORY_DIMS` accordingly and run `reindex`.
+
+### How do I remove RememBox?
+
+For Claude Code, unregister it:
+
+```bash
+claude mcp remove remembox -s user
+```
+
+For Claude Desktop, remove the corresponding block from `claude_desktop_config.json`.
+
+Then delete the unzipped RememBox folder.
+
+If you also want to delete the stored memories, delete:
+
+```text
+~/.remembox
+```
+
+### Is RememBox an official ObjectBox product?
+
+No. RememBox is an independent open-source project under the Apache License 2.0 and a showcase of ObjectBox usage.
+
+## Architecture, status and contributing
+
+Typed domain entities (`MemoryEntry`, `SourceDocument`, `MemoryLink`, `Tag`) are the source of truth.
+
+A `MemoryIndex` entity carries the HNSW vector index, and retrieval hydrates the domain entities after nearest-neighbour search.
+
+For details, ranking formulas and development notes, see:
+
+- [docs/architecture.md](docs/architecture.md)
+- [docs/contract/](docs/contract/)
+
+RememBox is used daily by its author and actively developed. It is not yet 1.0.
+
+The ranking formula and some defaults may continue to change; the storage schema and tool contracts are versioned.
+
+Issues and pull requests are welcome.
+
+- [CLAUDE.md](CLAUDE.md) contains the engineering rules.
+- [SECURITY.md](SECURITY.md) explains how to report a security issue.
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

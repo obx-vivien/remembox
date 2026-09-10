@@ -12,14 +12,179 @@ Everything below is generalized from a real daily setup, with all personal
 names, projects, and paths replaced by invented stand-ins
 (`my-app`, `home-renovation`, `side-business`, `taxes-2026`).
 
-## 1. The loop, in one paragraph
+## 1. More than memory: giving your AI continuity
 
-Before any non-trivial task, `recall` what's already known about it – a
-decision made last week saves you from re-deciding it, and a documented
-dead end saves you from re-running it. After the task, `remember` what a
-future session would need: not the transcript, the conclusion. The store is
-the *history* of a project, not a scratch notepad – treat every entry as
-something that will be read back, out of context, months from now.
+In practice, RememBox works best as one part of a small personal-assistant setup.
+
+A really useful assistant needs to answer three different questions:
+
+1. **What is going on right now?**
+2. **What happened before, and what do we already know?**
+3. **How should I work with this person?**
+
+Those belong in different places.
+
+There is one rule across all three layers:
+
+> **Sensitive personal values belong in RememBox, not in `CLAUDE.md`, skills or other standing prompt files.**
+>
+> Addresses, bank details, contract values, health information and similar private data stay in the local memory layer. Standing instructions should describe *how to work*, not contain the private values themselves.
+
+| Layer | What it is for | Good place | Examples |
+|---|---|---|---|
+| **Now** | Current operational state: what is active, open, blocked or next | A small local `cockpit.md` | Active work projects, a move, an insurance claim, an upcoming appointment, deadlines and TODOs |
+| **Memory** | What the assistant should know and remember over time: current facts, what happened, what was decided and why | RememBox | Addresses, bank details, family context, health context, goals, preferences, decisions, previous attempts, research conclusions |
+| **Rules** | How the assistant should behave and maintain the system | `CLAUDE.md` in Claude Code; a personal Skill in Desktop and Cowork | Recall before answering, keep memory current, maintain the cockpit, store conclusions rather than transcripts, supersede outdated facts |
+
+### 1. The cockpit: what matters right now
+
+Some information is valuable precisely because it is **current**.
+
+For example:
+
+```text
+WORK
+- Project A: pricing still unresolved
+  Next: review customer feedback
+
+HOME
+- Moving: comparing two apartments
+  Next: decide after Saturday's second viewing
+
+ADMIN
+- Insurance claim after a parking accident
+  Next: wait for the assessor's report
+
+PET
+- Dog vaccination due next month
+  Next: book appointment
+
+HOME
+- Heating repair still open
+  Next: wait for installer confirmation
+```
+
+This is not really long-term memory. It is a **living dashboard**.
+
+It should stay short. Completed items disappear. Next steps change. Old status is overwritten.
+
+That makes a simple local Markdown file a very good fit.
+
+### 2. RememBox: what the assistant already knows
+
+Behind every current topic is a much larger body of context.
+
+For a move, that might include:
+
+- the addresses of the apartments being considered
+- what matters when comparing them
+- previous visits and impressions
+- commute or transport constraints
+- earlier decisions and trade-offs
+
+For an insurance claim:
+
+- what happened
+- who is involved
+- relevant correspondence
+- what the insurer or assessor said
+- what has already been tried
+- which next step was agreed
+
+For everyday work and life:
+
+- home and company addresses
+- bank accounts used for different purposes
+- family members and pets
+- relevant health context
+- recurring preferences
+- long-term goals
+- project decisions
+- lessons from earlier attempts
+
+That belongs in RememBox because it is **knowledge and history**, not today's task list.
+
+Every memory also belongs to a **project or topic** – for example a work project, `personal`, `finance`, `moving`, or another stable scope. When the assistant recalls memory, it can search within that scope so unrelated parts of your life do not get mixed into the current conversation.
+
+And because RememBox retrieves by meaning within the relevant context, the assistant does not need your entire accumulated profile for every question.
+
+### 3. The memory practice: keep the system alive
+
+The third part is easy to underestimate.
+
+A memory system is much less useful if you have to remember to maintain it manually.
+
+The same memory practice is installed differently depending on where you use Claude:
+
+- **Claude Code:** put the standing memory rules in a global `CLAUDE.md`.
+- **Claude Desktop and Cowork:** use a personal Skill, because those surfaces do not read your Claude Code `CLAUDE.md`.
+- **The supplied RememBox Skill:** already contains the basic recall-first / remember-after loop.
+
+The rules teach the assistant to use memory as part of normal work.
+
+**Before substantive work**
+
+- check the current cockpit when broader context matters
+- recall relevant memories
+- scope recall to the current `project` or topic where possible
+- use previous decisions and lessons instead of starting from scratch
+
+**While working**
+
+- notice important new facts
+- notice when an existing fact has changed
+- capture decisions together with their reasoning
+- remember failed approaches when repeating them later would waste time
+- update the current next step when the situation changes
+
+**Afterwards**
+
+- store durable conclusions in RememBox
+- record decisions as `decision` entries with the reasoning
+- record meaningful dead ends as `episode` entries
+- add a dated status snapshot as a `fact` tagged `status` when useful
+- supersede outdated memories rather than silently contradicting them
+- link related memories when one explains, derives from or contradicts another
+- update the cockpit if the current operational state or next action changed
+- remove completed open loops from the cockpit
+
+This keeps the division of responsibility clear:
+
+- **The cockpit owns current operational state** – what is active, open, blocked or next.
+- **RememBox owns durable knowledge and history** – what is known, what happened, what was decided and why.
+- **The memory practice owns the maintenance rules** – how Claude keeps both useful and up to date.
+
+The cockpit is the authoritative current state. A status snapshot in RememBox is historical evidence of what the state was at that point in time.
+
+The result is not simply an AI with access to a database.
+
+It is an assistant that can maintain **continuity**:
+
+**what is happening now + what it already knows + how it should work with you.**
+
+The sections below contain the concrete setup: the global `CLAUDE.md` snippet, the personal skill for Desktop and Cowork, and the session-end routine.
+
+### Where should something go?
+
+A practical rule of thumb:
+
+| If the information answers... | Put it in... |
+|---|---|
+| **"What is happening now / what do I need to do next?"** | `cockpit.md` |
+| **"What do we know / what happened / what did we decide / why?"** | RememBox |
+| **"How should the assistant behave or perform this workflow?"** | `CLAUDE.md` in Claude Code or a personal Skill in Desktop/Cowork |
+
+The conflict rule is straightforward:
+
+- **The cockpit wins for current operational state.**
+- **RememBox wins for durable knowledge and history.**
+- **The Skill / `CLAUDE.md` wins for standing rules.**
+
+Some information can appear in more than one layer for different reasons.
+
+For example, "Apartment B is currently the preferred option" may belong in the cockpit because it is part of an active decision. The apartment's address and earlier viewing notes belong in long-term memory. The rule "when planning appointments, account for travel time" belongs in the assistant's standing instructions.
+
+The goal is not theoretical purity. It is to make future sessions useful without forcing one file or one database to do every job.
 
 ## 2. Global `CLAUDE.md` snippet
 
@@ -87,34 +252,9 @@ skip steps under load, and a rule that only lives in a prompt has no
 backstop. Making the server refuse the call is what actually holds; the
 `CLAUDE.md` snippet above is guidance for the common case, the server
 validation is what prevents the failure mode when the guidance is ignored
-or a session runs without that `CLAUDE.md` loaded at all (see §6).
+or a session runs without that `CLAUDE.md` loaded at all (see §5).
 
-## 4. The three-layer division of labour
-
-Running memory well needs more than a vector store – it needs a place for
-"what's true right now" that doesn't get lost in a growing history, and a
-place for "what's a standing rule" that doesn't get restated with a date
-stamp that goes stale. One practice that works:
-
-| Layer | What | Where | Update style |
-|---|---|---|---|
-| **Now** | One line per topic: current state + next step | A single personal "cockpit" file | Overwritten in place |
-| **History** | Dated status snapshots, decisions, incidents | RememBox (`kind: fact` + tag `status`; `kind: decision`; `kind: episode`) | Append-only |
-| **Rules** | Stable conventions, standing preferences, structure | Skills / `CLAUDE.md` | Edited when a rule itself changes, never dated |
-
-Two guardrails keep this from drifting:
-
-- **Never create a second cockpit or status file next to the first one.**
-  If the cockpit file isn't reachable in a given session, say so – don't
-  spin up a parallel status file "just for now"; that's exactly how two
-  sources of truth start disagreeing.
-- **On conflict, the layer that owns the question wins:** the cockpit wins
-  for "what's current", the memory store wins for "what happened and when
-  and why", the skill wins for "what's the rule". A skill should never
-  contain a dated status line – it goes stale in days and gets believed
-  anyway.
-
-## 5. Session-end routine
+## 4. Session-end routine
 
 At the end of any session with a notable result, run through this short
 checklist – it's cheap compared to the cost of a lost decision:
@@ -134,7 +274,7 @@ different question later: "what's next" (cockpit), "what happened and why"
 (memory), "what's the rule here" (skill/README) – skipping one leaves a
 gap the next session has to rediscover the hard way.
 
-## 6. A personal skill for Claude Desktop and Cowork
+## 5. A personal skill for Claude Desktop and Cowork
 
 `CLAUDE.md` is a Claude Code convention – Claude Desktop and Cowork
 sessions never read it. A [skill](https://docs.claude.com) (a `SKILL.md`
@@ -176,16 +316,16 @@ Because the server enforces `project` on every write (§3), this rule holds
 even in a session where the skill happened not to load – the skill is the
 convenience path, the server validation is the actual guarantee.
 
-## 7. Running several windows at once
+## 6. Running several windows at once
 
 More than one Claude window (or Cowork alongside Claude Code or Desktop)
 can share a single store safely by default: the server serializes access
 per call instead of holding the store open for a whole session, with no
 setting required. See the README's
-[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+[One store, multiple Claude windows](../README.md#one-store-multiple-claude-windows)
 section for the Sync exception and the HTTP daemon.
 
-## 8. A worked day (fictional, generic)
+## 7. A worked day (fictional, generic)
 
 A session working on a small project, `my-app`, start to finish:
 
@@ -216,7 +356,7 @@ A session working on a small project, `my-app`, start to finish:
    note to the project's own README if the work was detailed enough to
    warrant one.
 
-## 9. Things that bit the author
+## 8. Things that bit the author
 
 - **A rule that only lives in a prompt is not enforced.** "Always set
   `project`" as prose in a `CLAUDE.md` gets skipped under load; only the
@@ -243,4 +383,4 @@ A session working on a small project, `my-app`, start to finish:
 - **A second "temporary" status file next to the real one always lies
   eventually.** The moment there are two places that could hold the
   current state, one of them will be stale the next time someone reads it
-  – pick one leading place per question and stick to it (§4).
+  – pick one leading place per question and stick to it (§1).

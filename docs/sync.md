@@ -21,7 +21,7 @@ process lifetime, because a live Sync connection needs a standing store
 handle. Only one process may then use that store directory – for several
 windows at once, run the HTTP daemon instead, which every client talks to
 over HTTP (see
-[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+[One store, multiple Claude windows](../README.md#one-store-multiple-claude-windows)
 in the README).
 
 By default the sync server's published port is **loopback-only**

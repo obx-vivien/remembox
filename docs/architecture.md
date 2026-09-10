@@ -48,7 +48,7 @@ explicit `warnings`.
 For how the store itself is opened (once per process vs. once per tool
 call, and how that is derived automatically) and what that means
 operationally, see the README's
-[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+[One store, multiple Claude windows](../README.md#one-store-multiple-claude-windows)
 section.
 
 ## Ranking

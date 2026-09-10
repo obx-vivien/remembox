@@ -2,13 +2,13 @@
 
 All configuration is environment variables, read once at process start (or,
 in the default per-call store mode, effectively per tool call – see
-[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+[One store, multiple Claude windows](../README.md#one-store-multiple-claude-windows)
 in the README). Nothing is read from a config file.
 
 The three most people touch – `OBX_MEMORY_DIR`, `OBX_MEMORY_EMBED_MODEL`,
 `OBX_MEMORY_SYNC_URL` – are introduced in the README's
 [Quick start](../README.md#quick-start-macos-apple-silicon) and
-[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+[One store, multiple Claude windows](../README.md#one-store-multiple-claude-windows)
 sections. This page is the exhaustive list.
 
 | Variable | Default | Meaning |
@@ -40,5 +40,5 @@ everything with the current model).
 For the store-sharing behavior itself (what the default per-call mode,
 `persistent`, and the HTTP daemon actually do, and when Sync changes things),
 see the README's
-[One store, any number of windows](../README.md#one-store-any-number-of-windows)
+[One store, multiple Claude windows](../README.md#one-store-multiple-claude-windows)
 section.
