@@ -114,6 +114,17 @@ Next on the roadmap is structured data alongside free text: typed records
 like "what is the monthly rent for X" get an exact answer from your own
 data instead of a fresh search – and never have to be answered twice.
 
+## Design decisions
+
+| Decision | Why |
+|---|---|
+| **ObjectBox, not a SQL database plus a vector store** | One embedded database holds the typed entities, their relations *and* the HNSW vector index. No second system to run, no server, no config. Opening the store costs about half a millisecond, so it can be opened per tool call. |
+| **Entities are the truth, the vector index is a cache** | Memories, links, tags and sources are real objects with relations. The 768-dimension index references them and can be rebuilt any time with `reindex` – you never lose data to an embedding-model change. |
+| **Embeddings on your machine** | A local Ollama model turns text into vectors. No API key, no usage meter, and nothing leaves the machine to make memory searchable. |
+| **One self-contained folder** | A compiled Dart binary with the native library next to it. Nothing to install besides Ollama; the whole memory lives in one directory you can copy or back up. |
+| **Explicit forgetting, no decay** | Memories don't fade on a score. `forget` expires or deletes on request, `recall` ranks by meaning with small recency and frequency boosts – you decide what disappears. |
+| **Sync is opt-in and self-hosted** | Your memory replicates only to a server you run, and only if you switch it on. |
+
 ## Quick start (macOS)
 
 **You need:** a Mac with Apple Silicon (the release ZIP targets and is tested
