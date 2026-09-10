@@ -5,10 +5,13 @@ locally on your machine and retrieved when it is relevant. Your memory stays
 yours: it lives on your computer, works with Claude today, and can work with
 another agent tomorrow.**
 
+[![CI](https://github.com/obx-vivien/remembox/actions/workflows/ci.yml/badge.svg)](https://github.com/obx-vivien/remembox/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/github/license/obx-vivien/remembox)](LICENSE)
 [![Dart](https://img.shields.io/badge/Dart-3.10%2B-0175C2?logo=dart&logoColor=white)](https://dart.dev)
-[![Platform: macOS (arm64)](https://img.shields.io/badge/platform-macOS%20(arm64)-lightgrey)](#quick-start-macos)
+[![Platform: macOS (arm64)](https://img.shields.io/badge/platform-macOS%20(arm64)-lightgrey)](#quick-start-macos-apple-silicon)
 [![Latest release](https://img.shields.io/github/v/release/obx-vivien/remembox)](https://github.com/obx-vivien/remembox/releases/latest)
+
+In a hurry? Jump to the [Quick start](#quick-start-macos-apple-silicon).
 
 ## Why I built it
 
@@ -127,45 +130,41 @@ energy use, because it is way more efficient.
 | **Explicit forgetting, no decay** | Memories don't fade on a score. `forget` expires or deletes on request, `recall` ranks by meaning with small recency and frequency boosts – you decide what disappears. |
 | **Sync is opt-in and self-hosted** | Your memory replicates only to a server you run, and only if you switch it on. |
 
-## Quick start (macOS)
+## Quick start (macOS, Apple Silicon)
 
-**You need:** a Mac with Apple Silicon (the release ZIP targets and is tested
-on arm64; Intel and Linux are untested and need a build from source), and
-[Ollama](https://ollama.com) with the embedding model:
+1. **Install [Ollama](https://ollama.com)** and pull the embedding model:
 
-```bash
-ollama pull embeddinggemma
-```
+   ```bash
+   ollama pull embeddinggemma
+   ```
 
-**Get RememBox:** download the
-[latest release](https://github.com/obx-vivien/remembox/releases/latest) and
-unzip it somewhere permanent, e.g. `~/remembox` – not your Downloads folder.
-To build from source instead: `git clone`, then `tool/setup.sh` and
-`tool/build.sh` (Dart SDK ≥ 3.10); both produce the same self-contained
-`dist/` folder.
+2. **Download the [latest release](https://github.com/obx-vivien/remembox/releases/latest)**
+   and unzip it somewhere permanent, e.g. `~/remembox` – not your Downloads
+   folder. If macOS refuses to open it ("unidentified developer"), clear the
+   quarantine flag once for the whole folder:
 
-**Register with Claude Code:**
+   ```bash
+   xattr -dr com.apple.quarantine ~/remembox
+   ```
 
-```bash
-claude mcp add remembox --scope user -- /path/to/remembox/dist/remembox
-```
+3. **Register it** – with Claude Code:
 
-**Register with Claude Desktop:** in `claude_desktop_config.json` (Settings →
-Developer → Edit Config), add this block under `"mcpServers"`, then fully
-quit and reopen the app:
+   ```bash
+   claude mcp add remembox --scope user -- ~/remembox/dist/remembox
+   ```
 
-```json
-"remembox": {
-  "command": "/path/to/remembox/dist/remembox"
-}
-```
+   or with Claude Desktop: in `claude_desktop_config.json` (Settings →
+   Developer → Edit Config) add this block under `"mcpServers"`, using the
+   full path (no `~`), then fully quit and reopen the app:
 
-Replace `/path/to/remembox` with the real path.
+   ```json
+   "remembox": {
+     "command": "/path/to/remembox/dist/remembox"
+   }
+   ```
 
-**First test:** in a new session say "Remember that my favourite project is
-X." In another new session ask "What's my favourite project?" – done.
-
-If you choose a similar setup to the one I describe (including specific instructions in your glaubal Claude.md that makes using remembox part of every session), you don't need to always explicitely tell Claude to remember soemthing. It will do so automatically. However, if something is important to you, an additional "remember" is the save way to not loose something that is important to you.
+4. **Test it**: in a new session say "Remember that my favourite project is
+   X." In another new session ask "What's my favourite project?" – done.
 
 Every memory needs a `project`; `recall` filters by project only (tags are
 labels, not a filter), so the server rejects a `remember` without one. If
@@ -175,6 +174,21 @@ sets it.
 New to the terminal? [docs/quickstart.md](docs/quickstart.md) walks through
 every step, including Gatekeeper and Ollama troubleshooting
 ([German version](docs/quickstart.de.md)).
+
+### Other platforms: build from source
+
+Intel Macs and Linux are untested; the launcher and library loading are
+written to support them, so building from source is the way to try. With the
+Dart SDK ≥ 3.10 installed:
+
+```bash
+git clone https://github.com/obx-vivien/remembox.git
+cd remembox
+tool/setup.sh   # dependencies + ObjectBox library + code generation
+tool/build.sh   # produces the same self-contained dist/ folder
+```
+
+Then register `dist/remembox` exactly as in step 3 above.
 
 ## Use it from Claude Code, Claude Desktop and Cowork
 
@@ -299,6 +313,10 @@ current one, `get` still shows the history.
 
 **Can I change the embedding model?** Yes, via `OBX_MEMORY_EMBED_MODEL`; a
 different dimension count needs `OBX_MEMORY_DIMS` and a `reindex`.
+
+**How do I remove it?** Unregister it (`claude mcp remove remembox -s user`,
+or delete the block from `claude_desktop_config.json`), delete the unzipped
+folder, and delete `~/.remembox` if you also want the memories gone.
 
 **Is it an official ObjectBox product?** No – an independent open-source
 project (Apache-2.0) and a showcase of ObjectBox usage.

@@ -7,7 +7,7 @@ in the README). Nothing is read from a config file.
 
 The three most people touch – `OBX_MEMORY_DIR`, `OBX_MEMORY_EMBED_MODEL`,
 `OBX_MEMORY_SYNC_URL` – are introduced in the README's
-[Quick start](../README.md#quick-start-macos) and
+[Quick start](../README.md#quick-start-macos-apple-silicon) and
 [One store, any number of windows](../README.md#one-store-any-number-of-windows)
 sections. This page is the exhaustive list.
 

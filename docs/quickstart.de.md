@@ -13,7 +13,7 @@ Rechner nicht.
 > 15 Minuten und ca. 1 GB freien Speicherplatz. Das fertige ZIP-Paket ist
 > für Apple Silicon gebaut und getestet. Auf einem Intel-Mac oder unter
 > Linux läuft RememBox nur, wenn du es selbst aus dem Quellcode baust
-> (siehe [README](https://github.com/obx-vivien/remembox#quick-start-macos),
+> (siehe [README](https://github.com/obx-vivien/remembox#quick-start-macos-apple-silicon),
 > Abschnitt „build from source") – das ist ungetestetes Terrain, diese
 > Schritt-für-Schritt-Anleitung setzt das fertige ZIP voraus.
 

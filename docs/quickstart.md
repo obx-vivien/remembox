@@ -13,7 +13,7 @@ machine.
 > minutes, and roughly 1 GB of free disk space. The pre-built ZIP is built
 > and tested for Apple Silicon. On an Intel Mac or under Linux, RememBox
 > only runs if you build it yourself from source (see the
-> [README](https://github.com/obx-vivien/remembox#quick-start-macos),
+> [README](https://github.com/obx-vivien/remembox#quick-start-macos-apple-silicon),
 > "build from source" section) – that path is untested, and this
 > step-by-step guide assumes the pre-built ZIP.
 
