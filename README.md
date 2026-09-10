@@ -58,7 +58,7 @@ more it grows, the more valuable it gets for you, and it keeps growing only for 
 
 **The agent can change. Your memory doesn't have to.**
 
-Technically, RememBox is an [MCP](https://modelcontextprotocol.io) server –
+Technically, RememBox is an [MCP](https://modelcontextprotocol.io) server for [ObjectBox](https://objectbox.io/) –
 but MCP is just the interface. RememBox is the memory layer: persistent,
 searchable by meaning, private, and under your control.
 
