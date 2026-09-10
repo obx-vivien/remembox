@@ -363,5 +363,15 @@ void main() {
         );
       },
     );
-  });
+  },
+      // 2026-09-10: the negative control demonstrates a scheduling race, so
+      // it is not deterministic by nature. On GitHub's hosted macOS runner
+      // both unguarded writers happened to keep all 170 rows (the OS
+      // serialized them), which would fail this assertion for the wrong
+      // reason. It stays in every local run, where it has always reproduced
+      // the loss; on CI only the positive guarantees above are checked.
+      skip: Platform.environment.containsKey('CI')
+          ? 'race demonstration, not deterministic on hosted CI runners – '
+              'run locally'
+          : false);
 }
