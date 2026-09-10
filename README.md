@@ -112,7 +112,9 @@ on your disk, it is yours to inspect, back up, export or query directly.
 Next on the roadmap is structured data alongside free text: typed records
 (think property, contract, account) with exact field queries, so questions
 like "what is the monthly rent for X" get an exact answer from your own
-data instead of a fresh search – and never have to be answered twice.
+data instead of a fresh search. This means: 1. less searches, less costs
+2. less data sharing (only the number, not the whole contract) 3. less
+energy use, because it is way more efficient.
 
 ## Design decisions
 
