@@ -2,9 +2,7 @@
 
 **Give your AI a long-term memory that you own and can take with you. RememBox keeps it locally on your machine, works with Claude today, and can be used by other compatible AI assistants tomorrow.**
 
-Works with Claude Code, Claude Desktop and Cowork via MCP. Built on ObjectBox with local embeddings and semantic search.
-
-👉 [![Start using it now – Quick start](https://img.shields.io/badge/Start%20using%20it%20now-Quick%20start-17A6A6?style=for-the-badge)](#quick-start-macos-apple-silicon)
+Works with Claude Code, Claude Desktop and Cowork via MCP. Built on ObjectBox with local embeddings and semantic search. 👉 **[Start using it now (Quick start)](#quick-start-macos-apple-silicon)**
 
 [![CI](https://github.com/obx-vivien/remembox/actions/workflows/ci.yml/badge.svg)](https://github.com/obx-vivien/remembox/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/github/license/obx-vivien/remembox)](LICENSE)
