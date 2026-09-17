@@ -423,6 +423,12 @@ The local memory database, embedding model and search work offline after the one
 
 Of course, a cloud-based assistant such as Claude still needs whatever connectivity its own application requires.
 
+### Why not just use Notion (or another knowledge base) as the assistant's memory?
+
+You can, and for documentation it is a good place – I use Confluence and Obsidian for certain parts myself, and an assistant can write there through their APIs or MCP servers just as it writes to RememBox.
+
+But as the memory, a cloud knowledge base costs more per question by construction: every lookup is a network round trip, semantic search runs an embedding call and a model on the server side, and whole pages come back instead of a handful of memories, so more tokens reach the AI each time. Your data lives with one provider, and offline works only partly. A connected assistant also acts with your full permissions there and can read everything you can. RememBox answers from a local index lookup in milliseconds, returns only the few memories that best match – five by default – and the assistant can narrow that to a single project. See [What goes to the cloud](#what-goes-to-the-cloud--and-what-never-does).
+
 ### Can two Claude windows use it at the same time?
 
 Yes, in the default local configuration. RememBox serializes access per call, so Claude Code, Desktop and Cowork can share one store without an extra setting.
