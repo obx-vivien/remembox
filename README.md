@@ -1,6 +1,8 @@
 # RememBox – long-term memory for your AI, owned by you
 
-**Give your AI a long-term memory that you own and can take with you. RememBox keeps it locally on your machine, works with Claude today, and can be used by other compatible AI assistants tomorrow.**
+**The AI is replaceable. Your memory is an asset you keep.**
+
+Give your AI a long-term memory that you own and can take with you. RememBox keeps it locally on your machine, works with Claude today, and can be used by other compatible AI assistants tomorrow.
 
 Works with Claude Code, Claude Desktop and Cowork via MCP. Built on ObjectBox with local embeddings and semantic search. 👉 **[Start using it now (Quick start)](#quick-start-macos-apple-silicon)**
 
@@ -96,8 +98,6 @@ One boundary matters: **the AI you use may still be a cloud service.** When Clau
 ## Your memory stays yours – even if your AI changes
 
 Provider memory is convenient, but the more useful it becomes, the harder it is to leave. RememBox separates **the memory** from **the model using it**: the database lives on your disk and is exposed through [MCP](https://modelcontextprotocol.io), a standard interface between AI applications and tools. I use it with Claude Code, Claude Desktop and Cowork today; another compatible AI can use the same accumulated context later.
-
-**The AI is replaceable. Your memory is an asset you keep.**
 
 ## Why I built it
 
