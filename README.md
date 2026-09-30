@@ -61,7 +61,7 @@ A really useful assistant needs to answer three different questions, and they be
 |---|---|---|---|
 | **Now** | What is going on right now? | A small local `cockpit.md` | Active projects, a move, an insurance claim, deadlines, next actions |
 | **Memory** | What should the assistant know and remember over time? | RememBox | Addresses, bank details, family and health context, goals, preferences, decisions, previous attempts |
-| **Rules** | How should the assistant work with me? | `CLAUDE.md` in Claude Code; a personal skill in Desktop and Cowork | Recall before answering, keep memory current, maintain the cockpit, supersede outdated facts |
+| **Rules** | How should the assistant work with me? | `CLAUDE.md` in Claude Code; the Instructions for Claude field in Desktop, Cowork, web and mobile; a skill for the long form | Recall before answering, keep memory current, maintain the cockpit, supersede outdated facts |
 
 One rule cuts across all three: **sensitive personal values belong in RememBox, not in `CLAUDE.md`, skills or other standing prompt files.** Those describe *how to work*; the private values stay in the local memory layer.
 
@@ -120,7 +120,7 @@ Implementation details: [Technical details](#technical-details).
 
 Memories relate to each other: a decision points to the research behind it, a correction replaces an old fact without deleting the history, a failed attempt stays attached to its project so another session does not repeat it. Over time RememBox becomes a small private knowledge graph – a normal database on your disk, yours to inspect, back up, export or query.
 
-**Next on the roadmap:** structured personal data alongside free-form memories – typed records such as a property, contract or account with exact field queries, so *"What is the monthly rent for X?"* returns the stored value instead of re-reading the contract.
+Structured facts sit alongside the free-form memories: an exact value – a rent, a renewal date, a VIN – stored under a subject and attribute, with history, and looked up exactly instead of searched by meaning. *"What is the monthly rent for Flat B?"* returns the stored value instead of re-reading the contract. Areas group projects many-to-many – one project can belong to several areas, and `recall`/`list_recent`/`fact_query` can filter by area instead of listing every project name.
 
 ---
 
@@ -180,7 +180,20 @@ Add this block under `"mcpServers"`, using the full path rather than `~`:
 
 Then fully quit and reopen Claude Desktop.
 
-### 4. Test it
+### 4. Make the rules load in every session
+
+RememBox only works reliably if the assistant gets its usage rules at the start of *every* session. Without them, sessions invent new spellings of the same project name, use one name in one client and another in the next, and run maintenance tools nobody asked for. A skill is not enough for this – skills load only when their description matches the topic. Put the short block below into the place your client always loads:
+
+- **Claude Desktop, Cowork, claude.ai web and mobile:** claude.ai → Settings → Account → **Instructions for Claude** (in some app versions the field appeared as "personal preferences"; Cowork's former "Global instructions" now live there too).
+- **Claude Code:** `~/.claude/CLAUDE.md` as well – Claude Code reads this file at the start of every session; the other clients do not read it.
+
+```text
+Memory (RememBox): Before any non-trivial task, call recall first; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Before using a new project name, call areas_list and pick an existing one. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry, check tags_list first; never use a project name, an area name or an identifier as a tag. Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+```
+
+Replace the project list with your own, keep the block short (it is loaded into every chat), and keep both places in sync when the list changes. Changes reliably apply to new sessions – start a new chat after editing. Why and how: [usage guide, section 6](docs/usage-guide.md#6-making-the-rules-load-every-time).
+
+### 5. Test it
 
 In a new session, say:
 
@@ -192,7 +205,7 @@ Then open another new session and ask:
 
 That's it.
 
-Every memory needs a `project` so memories stay scoped to the right topic. If Claude does not know the project, tell it – or install the RememBox skill below, which teaches Claude the normal recall / remember workflow.
+Every memory needs a `project` so memories stay scoped to the right topic. If Claude does not know the project, tell it – or make sure the rules from step 4 are loaded, which teach Claude the normal recall / remember workflow.
 
 New to the terminal? [docs/quickstart.md](docs/quickstart.md) walks through every step, including Gatekeeper and Ollama troubleshooting. There is also a [German version](docs/quickstart.de.md).
 
@@ -215,16 +228,18 @@ Then register `dist/remembox` exactly as in step 3 above.
 
 Installing RememBox gives the AI access to persistent memory.
 
-The supplied skill turns that access into a **memory practice**: the assistant is instructed to recall context proactively and keep the memory current as part of normal work, without waiting for you to say "remember this" every time.
+Making the rules load in every session (step 4 above) is what turns that access into a **memory practice**: the assistant is instructed to recall context proactively and keep the memory current as part of normal work, without waiting for you to say "remember this" every time. The supplied skill adds the long form of those rules.
 
-Install it with:
+The skill ships as `skill/SKILL.md`, both in this repository and inside the release ZIP – there is only one copy to keep current.
+
+Claude Code reads skills from `~/.claude/skills/<name>/SKILL.md`, so install it there as `remembox-memory/SKILL.md`:
 
 ```bash
 mkdir -p ~/.claude/skills/remembox-memory
 cp ~/remembox/skill/SKILL.md ~/.claude/skills/remembox-memory/SKILL.md
 ```
 
-That installs it for Claude Code, where the same principles can also live in a global `CLAUDE.md`. In Claude Desktop and Cowork, add the same file as a personal skill through the app's skill settings – those surfaces do not read `CLAUDE.md`.
+That installs it for Claude Code. Claude Desktop and Cowork take the same file as a personal skill upload instead, through the app's skill settings – those surfaces do not read `CLAUDE.md` and do not read from `~/.claude/skills/`. Either way a skill is loaded only when the topic matches, so it is the detail layer on top of the always-loaded block from step 4, not a replacement for it.
 
 The important rules are simple:
 
@@ -240,7 +255,7 @@ The important rules are simple:
 - **Keep sensitive values in RememBox**, not in `CLAUDE.md` or Skills.
 - **Keep rules, current operational state and durable knowledge separate** so each has one clear source of truth.
 
-The [usage guide](docs/usage-guide.md) contains the concrete setup, including the global `CLAUDE.md` snippet, the personal skill for Desktop and Cowork, the cockpit pattern and the session-end routine.
+The [usage guide](docs/usage-guide.md) contains the concrete setup, including the three layers (the Instructions for Claude field, `CLAUDE.md`, skill), the full global `CLAUDE.md` snippet, the cockpit pattern and the session-end routine.
 
 ---
 
@@ -313,6 +328,11 @@ Every `supersede` also adds a forward link from the old version to the new one.
 | `list_recent` | Show recent memories. |
 | `stats` | Inspect store and index health. |
 | `reindex` | Rebuild the vector index. |
+| `area_set` / `project_set` | Create or update a life/work area, or a project's description, status and area membership. |
+| `areas_list` / `project_merge` / `entries_move` | List areas with their projects and registry health; merge one project name into another; move selected entries into a different project (splits a catch-all project). |
+| `fact_set` / `fact_get` / `fact_query` | Set, look up or search an exact structured value (subject + attribute + project), with history. |
+| `fact_forget` | Retract a fact, close it as of a date, or delete it permanently. |
+| `tags_list` / `tag_merge` / `tag_remove` / `tags_normalize` | List tags with live usage counts and variant groups; merge spelling variants into one tag; remove tags; one-shot upgrade helper that normalizes every pre-0.3.0 tag spelling. |
 
 ## Project scope
 
@@ -325,8 +345,9 @@ This is the technical mechanism behind the user-facing topic scopes described ab
 - `project`
 - `kind`
 - `sourceType`
+- `area` – every project assigned to that area via `area_set`/`project_set`
 
-Tags are labels, not a recall filter.
+`list_recent` filters the same way by `project` and `area`. Tags are labels, not a recall filter.
 
 The supplied skill teaches Claude to set project names consistently. The server also validates this itself so the rule does not depend only on prompt compliance.
 

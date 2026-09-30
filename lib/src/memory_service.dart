@@ -22,6 +22,17 @@ import 'store.dart' show LogSink, StoreMode, stderrLog;
 import 'store.dart' as store_lib show sanitizeForLog, truncateForError;
 import 'store_gate.dart';
 
+// 2026-09-21, areas and facts (0.3.0): the areas/facts feature lives in
+// part files (not separate libraries) so it can use the private helpers
+// below (_withSession, _useQuery, _pageThrough, _requireLen, ...) without
+// widening their visibility. This file owns the `part` directives and
+// getters; the part files themselves are split by area (registry, areas,
+// facts) so each can be worked on independently.
+part 'memory_service_registry.dart';
+part 'memory_service_areas.dart';
+part 'memory_service_facts.dart';
+part 'memory_service_tags.dart';
+
 /// Invalid tool input (unknown kind, missing entry, ...). The MCP adapter
 /// maps this to an isError tool result with the message verbatim.
 class ValidationException implements Exception {
@@ -117,6 +128,12 @@ class MemoryService {
   Box<SourceDocument> get _docs => _requireSession('_docs').docs;
   Box<MemoryLink> get _links => _requireSession('_links').links;
   Box<MemoryIndex> get _index => _requireSession('_index').index;
+  // 2026-09-21, areas and facts (0.3.0):
+  Box<ProjectScope> get _projects => _requireSession('_projects').projects;
+  Box<Area> get _areas => _requireSession('_areas').areas;
+  Box<AreaMembership> get _memberships =>
+      _requireSession('_memberships').memberships;
+  Box<Fact> get _facts => _requireSession('_facts').facts;
 
   /// Runs [body] inside exactly one [gate.withStore] lending, setting
   /// [_currentSession] for its duration so the getters above resolve. This
@@ -348,6 +365,27 @@ class MemoryService {
   /// before this, a 1 MiB `project` filter was forwarded whole to the
   /// store query.
   static const int projectMaxLen = 200;
+
+  // 2026-09-21, areas and facts (0.3.0): public aliases of the caps the
+  // registry/facts part files already enforce under private names –
+  // server.dart is a different library and needs the numbers for its
+  // tool-schema descriptions without duplicating them. One-line
+  // visibility change only; the enforcing code and its private name stay
+  // where they were.
+  static const int areaNameMaxLen = _areaNameMaxLen;
+  static const int descriptionMaxLen = _registryDescriptionMaxLen;
+  static const int subjectMaxLen = _subjectMaxLen;
+  static const int attributeMaxLen = _attributeMaxLen;
+  static const int factTextMaxLen = _factTextMaxLen;
+  static const int unitMaxLen = _unitMaxLen;
+  // 2026-09-21, entries move (0.3.0): same one-line visibility alias,
+  // added alongside the areas/facts ones above – entriesMove's own count
+  // cap enforced in memory_service_areas.dart under the private name.
+  static const int entriesMoveMaxIds = _entriesMoveMaxIds;
+  // 2026-09-21 review3 m2 fix: same alias shape, for the TOTAL
+  // (requested + chain-added) cap.
+  static const int entriesMoveMaxTotalIds = _entriesMoveMaxTotalIds;
+
   static const int _languageMaxLen = 16;
   static const int _sourceRefMaxLen = 4096;
   static const int _tagMaxLen = 128;
@@ -425,6 +463,12 @@ class MemoryService {
       '`home`, `personal`). recall filters by project only — tags are '
       'not a filter, so an entry without project cannot be found on '
       'purpose.';
+
+  /// Public accessor for [_projectRule] (2026-09-21, areas and facts
+  /// (0.3.0)): `fact_set`'s `project` argument (server.dart) needs the
+  /// exact same rule text as `remember`'s – this getter lets it reuse
+  /// the one copy instead of duplicating the string.
+  static String get projectRule => _projectRule;
 
   static bool _isBlankProject(String? project) =>
       project == null || project.trim().isEmpty;
@@ -745,6 +789,12 @@ class MemoryService {
     // deliberately crosses the lending boundary below — safe because only its
     // plain scalar fields (.id, .title) are read afterward, never a lazy
     // relation.
+    // 2026-09-21, areas and facts (0.3.0): registry warnings collected
+    // INSIDE the write tx below – a plain outer list mutated by the
+    // (synchronous) transaction closure, not a second return value, so
+    // the existing `txResult is MemoryEntry` / `as int` dedup-vs-insert
+    // dispatch just below stays untouched.
+    final registryWarnings = <String>[];
     final Object txResult = await _withSession('remember-entry', () {
       return store.runInTransaction(TxMode.write, () {
         final existing = _useQuery(
@@ -765,8 +815,46 @@ class MemoryService {
             docCreatedAt: docCreatedAt,
           );
         }
-        entry.tags.addAll(tags.map(_getOrCreateTag));
-        return _entries.put(entry);
+        // 2026-09-21, tag discipline (0.3.0): _prepareTags is the single
+        // enforcement point for the tag rules (normalize, drop redundant/
+        // duplicate, warn on near-duplicate/too-many/identifier-like) – run
+        // INSIDE this write tx (it queries _tags/_memberships) and BEFORE
+        // entry.tags is populated, so the entity only ever gets the
+        // prepared (not raw) tag list. See memory_service_tags.dart.
+        final prepared = _prepareTags(tags, project: validatedProject, kind: kind);
+        entry.tags.addAll(prepared.tags.map(_getOrCreateTag));
+        final id = _entries.put(entry);
+        // 2026-09-21, areas and facts (0.3.0): register the project (or
+        // note it is already registered) and surface a near-duplicate-name
+        // warning, in this SAME write tx – F15 forbids a nested StoreGate
+        // lending, and `_ensureProjectScope`/`_nearDuplicateProjects`
+        // (memory_service_registry.dart) are written to be called from
+        // exactly here. Deliberately NOT reached on the dedup path above
+        // (`existing != null` already returned) – the duplicate-remember
+        // path is unchanged.
+        final ensured = _ensureProjectScope(
+          validatedProject,
+          reason: 'remember',
+        );
+        registryWarnings.addAll(ensured.warnings);
+        final dupeProjects = _nearDuplicateProjects(validatedProject);
+        if (dupeProjects.isNotEmpty) {
+          registryWarnings.add(
+            'project "${sanitizeForLog(validatedProject)}" differs from '
+            'existing '
+            '${dupeProjects.map((n) => '"${sanitizeForLog(n)}"').join(', ')} '
+            'only by case/space/-/_; use the existing name or run '
+            'project_merge.',
+          );
+        }
+        if (prepared.warnings.isNotEmpty) {
+          registryWarnings.addAll(prepared.warnings);
+          log(
+            '[memory] entry $id tag preparation: '
+            '${prepared.warnings.join(' | ')}',
+          );
+        }
+        return id;
       });
     });
     if (txResult is MemoryEntry) {
@@ -813,7 +901,11 @@ class MemoryService {
     // transaction (forbidden — contract §8, async I/O must not sit inside a DB
     // transaction) or a per-entry lock, which is more machinery than a single
     // harmless redundant embed justifies.
-    final warnings = <String>[];
+    // Seeded with the registry/near-duplicate warnings from the write tx
+    // above (2026-09-21, areas and facts 0.3.0) – one joined `warning`
+    // string, same key remember()'s indexing/expiry warnings already use
+    // below, not a second one.
+    final warnings = <String>[...registryWarnings];
     bool indexed = true;
     try {
       // Split embed (unlocked async I/O) from the index-row write (locked,
@@ -1055,6 +1147,12 @@ class MemoryService {
     String? kind,
     String? project,
     String? sourceType,
+    // 2026-09-21, areas and facts (0.3.0): filters to entries
+    // whose project belongs to this area (many-to-many via
+    // AreaMembership). Resolved inside the recall lending, below –
+    // resolution needs a store query (_resolveAreaProjects), so it cannot
+    // happen up here before the lending opens.
+    String? area,
     bool includeSuperseded = false,
   }) async {
     if (k <= 0) throw ValidationException('k must be >= 1.');
@@ -1086,6 +1184,7 @@ class MemoryService {
         kind: kind,
         project: project,
         sourceType: sourceType,
+        area: area,
         includeSuperseded: includeSuperseded,
         vector: vector,
       );
@@ -1098,6 +1197,7 @@ class MemoryService {
     required String? kind,
     required String? project,
     required String? sourceType,
+    required String? area,
     required bool includeSuperseded,
     required List<double> vector,
   }) {
@@ -1112,6 +1212,59 @@ class MemoryService {
     );
 
     final warnings = <String>[];
+
+    // 2026-09-21, areas and facts (0.3.0): `area` is resolved
+    // HERE (inside the recall lending – _resolveAreaProjects needs a store
+    // query, F15 forbids a nested one) before the ANN search runs. Two
+    // cases return an explicit empty result WITHOUT running the (paid-for)
+    // embedding's ANN search or the per-candidate filter loop below – an
+    // area with zero projects, or an explicit `project` that isn't a
+    // member of `area` (addendum m8: never filter down to an
+    // unsatisfiable condition silently; here there is no `oneOf([])` to
+    // build in the first place, since recall filters per-candidate in
+    // Dart, but the same "never silently return nothing" discipline
+    // applies – surfaced as a warning, not a bare empty `hits: []`).
+    // Throws ValidationException for an unknown area, same as every other
+    // area-accepting tool.
+    Set<String>? areaProjects;
+    if (area != null) {
+      final resolved = _resolveAreaProjects(area);
+      if (project != null && !resolved.contains(project)) {
+        final msg =
+            'project "${sanitizeForLog(project)}" is not a member of area '
+            '"${sanitizeForLog(area)}" – recall returned no results.';
+        warnings.add(msg);
+        log('[memory] recall: $msg');
+        return {
+          'query': query,
+          '_provenance_note': _provenanceNote,
+          'k': k,
+          'hits': const [],
+          'candidatesFetched': 0,
+          'warnings': warnings,
+        };
+      }
+      if (resolved.isEmpty) {
+        final msg =
+            'area "${sanitizeForLog(area)}" has no projects – recall '
+            'returned no results.';
+        warnings.add(msg);
+        log('[memory] recall: $msg');
+        return {
+          'query': query,
+          '_provenance_note': _provenanceNote,
+          'k': k,
+          'hits': const [],
+          'candidatesFetched': 0,
+          'warnings': warnings,
+        };
+      }
+      // project == null (or project is a member, in which case the
+      // existing per-candidate `project` equality check below is already
+      // the tightest possible filter – no need to also intersect).
+      if (project == null) areaProjects = resolved.toSet();
+    }
+
     final staleRows = <MemoryIndex>[];
     var orphaned = 0,
         expired = 0,
@@ -1181,6 +1334,7 @@ class MemoryService {
         }
         if ((kind != null && entry.kind != kind) ||
             (project != null && entry.project != project) ||
+            (areaProjects != null && !areaProjects.contains(entry.project)) ||
             (sourceType != null && entry.sourceType != sourceType)) {
           filteredOut++;
           continue;
@@ -1436,6 +1590,7 @@ class MemoryService {
     late final int indexRowsRemoved;
     late final int linksRemoved;
     late final int tagLinks;
+    late final int factLinksCleared;
     store.runInTransaction(TxMode.write, () {
       tagLinks = entry.tags.length;
       entry.tags.clear();
@@ -1460,12 +1615,27 @@ class MemoryService {
         other.supersededBy.targetId = 0;
         _entries.put(other);
       }
+      // 2026-09-21, areas and facts (0.3.0): same cascade
+      // discipline as the MemoryLink/supersededBy cleanup above – a Fact
+      // whose `explainedBy` points at this entry must not keep a dangling
+      // ToOne once the entry is gone, so it's cleared (not the Fact row
+      // itself; the fact's exact value stands on its own) and counted,
+      // never silently left dangling.
+      final factsPointingHere = _useQuery(
+        _facts.query(Fact_.explainedBy.equals(id)),
+        (q) => q.find(),
+      );
+      for (final f in factsPointingHere) {
+        f.explainedBy.targetId = 0;
+        _facts.put(f);
+      }
+      factLinksCleared = factsPointingHere.length;
       _entries.remove(id);
     });
     log(
       '[memory] hard-deleted entry $id '
       '(indexRows=$indexRowsRemoved, links=$linksRemoved, '
-      'tagLinks=$tagLinks)',
+      'tagLinks=$tagLinks, factLinksCleared=$factLinksCleared)',
     );
     final result = {
       'id': id,
@@ -1473,6 +1643,7 @@ class MemoryService {
       'indexRowsRemoved': indexRowsRemoved,
       'memoryLinksRemoved': linksRemoved,
       'tagLinksRemoved': tagLinks,
+      'factLinksCleared': factLinksCleared,
     };
     return _applyGuardPeerWarning(result);
   });
@@ -1573,11 +1744,47 @@ class MemoryService {
   // list_recent / stats
   // -------------------------------------------------------------------------
 
-  Future<Map<String, Object?>> listRecent({int n = 10, String? project}) =>
-      _withSession('listRecent', () {
+  Future<Map<String, Object?>> listRecent({
+    int n = 10,
+    String? project,
+    // 2026-09-21, areas and facts (0.3.0).
+    String? area,
+  }) => _withSession('listRecent', () {
     if (n <= 0) throw ValidationException('n must be >= 1.');
-    final condition =
-        project == null ? null : MemoryEntry_.project.equals(project);
+    Condition<MemoryEntry>? condition;
+    if (area != null) {
+      // _resolveAreaProjects throws ValidationException for an unknown
+      // area – same as every other area-accepting tool.
+      final areaProjects = _resolveAreaProjects(area);
+      // Review minor 4: an explicit `project` that is not a member of
+      // `area` used to fall through to the normal query (project AND
+      // area combined), which silently returns count:0 with no
+      // explanation – recall/factQuery both warn instead. Mirrored here.
+      if (project != null && !areaProjects.contains(project)) {
+        final msg =
+            'project "${sanitizeForLog(project)}" is not a member of area '
+            '"${sanitizeForLog(area)}".';
+        log('[memory] listRecent: $msg');
+        return {'count': 0, 'entries': const [], 'warning': msg};
+      }
+      if (areaProjects.isEmpty) {
+        // Never build an `oneOf([])` – a real area with zero members
+        // means zero matching entries, reported explicitly rather than
+        // run a query that (harmlessly, but pointlessly) always returns
+        // nothing.
+        final msg = 'area "${sanitizeForLog(area)}" has no projects.';
+        log('[memory] listRecent: $msg');
+        return {'count': 0, 'entries': const [], 'warning': msg};
+      }
+      condition = MemoryEntry_.project.oneOf(areaProjects, caseSensitive: true);
+    }
+    if (project != null) {
+      final projectCondition = MemoryEntry_.project.equals(
+        project,
+        caseSensitive: true,
+      );
+      condition = condition == null ? projectCondition : condition & projectCondition;
+    }
     // Ordered query with limit — the DB does the sorting and slicing, no
     // getAll()+sort in memory (how-to-use-objectbox.md §5).
     final builder = (condition == null
@@ -1595,6 +1802,16 @@ class MemoryService {
       ],
     };
   });
+
+  /// Distinct exact project strings referenced by [MemoryEntry.project] and
+  /// [Fact.project], blanks (and whitespace-only strings, the shared
+  /// [_isBlankProject] rule) excluded – used only by `stats()`'s
+  /// `registry.unregisteredProjects` below. A thin wrapper around the
+  /// shared [_distinctUsedProjects] primitive, adding only the
+  /// blank/whitespace filter `stats()` needs and that primitive
+  /// deliberately leaves to callers.
+  Set<String> _distinctUsedProjectNamesForStats() =>
+      _distinctUsedProjects()..removeWhere(_isBlankProject);
 
   Future<Map<String, Object?>> stats() => _withSession('stats', () {
     // 2026-09-07 -- ObjectBox conformance review (R3): every count()/
@@ -1703,6 +1920,113 @@ class MemoryService {
       final tagIds = _useQuery(_tags.query(), (q) => q.findIds()).toSet();
       final orphanedTags = tagIds.difference(referencedTagIds).length;
 
+      // 2026-09-21, areas and facts (0.3.0): byProject/byArea/registry/
+      // facts – all computed in THIS SAME read transaction (the
+      // method-level comment above explains why: one consistent
+      // snapshot), via direct box queries. Deliberately NOT via
+      // areasList()/factQuery() (calling a public tool method from inside
+      // stats()'s single lending would nest a second StoreGate lending,
+      // forbidden by F15); bounded – no getAll() on MemoryEntry/Fact, and
+      // (review minor 9) `_pageThrough` rather than a bare `.find()` on
+      // the registry tables too, matching what `areasList` already does
+      // for the same tables.
+      final projectValues = _distinctUsedProjects(includeFacts: false);
+      final byProject = <String, int>{
+        for (final p in projectValues)
+          p: countWhere(MemoryEntry_.project.equals(p, caseSensitive: true)),
+      };
+
+      final allAreaRows = <Area>[];
+      _pageThrough<Area>(_areas.query(), (page) => allAreaRows.addAll(page));
+      final byArea = <String, int>{};
+      for (final a in allAreaRows) {
+        final names = _resolveAreaProjects(a.name);
+        // Never build `oneOf([])` – a real area with zero members has
+        // zero matching entries by construction.
+        byArea[a.name] = names.isEmpty
+            ? 0
+            : countWhere(
+                MemoryEntry_.project.oneOf(names, caseSensitive: true),
+              );
+      }
+
+      final registeredProjectNames = _useQuery(_projects.query(), (q) {
+        final prop = q.property(ProjectScope_.name)
+          ..distinct = true
+          ..caseSensitive = true;
+        try {
+          return prop.find();
+        } finally {
+          prop.close();
+        }
+      }).toSet();
+      final registeredAreaNames = allAreaRows.map((a) => a.name).toSet();
+      final usedProjectNames = _distinctUsedProjectNamesForStats();
+      final unregisteredProjects = usedProjectNames
+          .where((p) => !registeredProjectNames.contains(p))
+          .length;
+      // The same blank rule as areasList/backfillProjectRegistry
+      // (trim().isEmpty, not only the exact empty string) – see
+      // [_isBlankProject].
+      final blankProjectEntries = _countBlankProjectEntries();
+      final allMemberships = <AreaMembership>[];
+      _pageThrough<AreaMembership>(
+        _memberships.query(),
+        (page) => allMemberships.addAll(page),
+      );
+      final membershipsWithoutArea = allMemberships
+          .where((m) => !registeredAreaNames.contains(m.area))
+          .length;
+      final membershipsWithoutProjectRows = allMemberships
+          .where((m) => !registeredProjectNames.contains(m.project))
+          .length;
+      final registry = {
+        'projects': _projects.count(),
+        'areas': _areas.count(),
+        'archived': _useQuery(
+          _projects.query(
+            ProjectScope_.status.equals(ProjectStatus.archived),
+          ),
+          (q) => q.count(),
+        ),
+        'merged': _useQuery(
+          _projects.query(ProjectScope_.status.equals(ProjectStatus.merged)),
+          (q) => q.count(),
+        ),
+        'unregisteredProjects': unregisteredProjects,
+        'blankProjectEntries': blankProjectEntries,
+        'membershipsWithoutArea': membershipsWithoutArea,
+        'membershipsWithoutProjectRows': membershipsWithoutProjectRows,
+      };
+
+      // "Current" per the addendum's definition: open-ended, not
+      // retracted, and already valid (validFrom <= now) – see
+      // [Fact.isCurrent]'s doc for why the instant check lives here, not
+      // on the entity. Property projection (no `distinct`: one entry per
+      // CURRENT row is exactly what the conflict count below needs), so
+      // this is bounded by #current facts, never #all facts.
+      final currentFactKeys = _useQuery(
+        _facts.query(_factValidAtCondition(now)),
+        (q) {
+          final prop = q.property(Fact_.factKey);
+          try {
+            return prop.find();
+          } finally {
+            prop.close();
+          }
+        },
+      );
+      final factKeyCounts = <String, int>{};
+      for (final k in currentFactKeys) {
+        factKeyCounts[k] = (factKeyCounts[k] ?? 0) + 1;
+      }
+      final conflictingKeys = factKeyCounts.values.where((c) => c > 1).length;
+      final facts = {
+        'total': _facts.count(),
+        'current': currentFactKeys.length,
+        'conflictingKeys': conflictingKeys,
+      };
+
       return {
         'store': {
           'directory': store.directoryPath,
@@ -1745,6 +2069,11 @@ class MemoryService {
           'weightRecency': rankWeightRecency,
           'weightFrequency': rankWeightFrequency,
         },
+        // 2026-09-21, areas and facts (0.3.0).
+        'byProject': byProject,
+        'byArea': byArea,
+        'registry': registry,
+        'facts': facts,
       };
     });
   });
@@ -2034,6 +2363,18 @@ class MemoryService {
       }
     }
 
+    // Phase 5 – registry backfill (2026-09-21, areas and facts 0.3.0):
+    // registers ProjectScope rows for legacy project strings already used
+    // on MemoryEntry/Fact but never explicitly registered.
+    // `backfillProjectRegistry` (memory_service_areas.dart) manages its
+    // OWN StoreGate lending – this call is a plain awaited function call,
+    // deliberately NOT nested inside any `_withSession` block above (F15
+    // forbids a nested lending): a real call like any other reindex
+    // phase, whose failure propagates like any other error in reindex,
+    // same as every phase above it.
+    final registrySummary = await backfillProjectRegistry(dryRun: dryRun);
+    log('[reindex] registry: ${jsonEncode(registrySummary)}');
+
     final summary = {
       'trigger': trigger,
       'dryRun': dryRun,
@@ -2048,6 +2389,7 @@ class MemoryService {
           purgeDanglingLinks && !dryRun ? danglingLinkIds.length : 0,
       if (danglingLinkDetails.isNotEmpty)
         'danglingLinkDetails': danglingLinkDetails,
+      'registry': registrySummary,
     };
     final changedOrFailed =
         created +

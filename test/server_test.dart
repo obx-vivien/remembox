@@ -411,6 +411,53 @@ void main() {
   );
 
   test(
+    'review M2 (2026-09-21, areas and facts (0.3.0)): remember with an '
+    'expiresAt date-time and no explicit UTC offset/Z is rejected as '
+    'invalid_input, not silently parsed in the server\'s local time zone',
+    () async {
+      final result = await connection.callTool(
+        CallToolRequest(
+          name: 'remember',
+          arguments: {
+            'text': 'expires soon',
+            'project': 'test',
+            'expiresAt': '2099-03-01T10:00:00',
+          },
+        ),
+      );
+      expect(result.isError, isTrue);
+      final json = _decodeToolJson(result);
+      expect(json['error'], 'invalid_input');
+      expect(json['message'], contains('offset'));
+    },
+  );
+
+  test(
+    'review M2 (2026-09-21, areas and facts (0.3.0)): remember with a '
+    'date-only expiresAt means UTC midnight for that calendar date',
+    () async {
+      final remembered = await connection.callTool(
+        CallToolRequest(
+          name: 'remember',
+          arguments: {
+            'text': 'expires on a date',
+            'project': 'test',
+            'expiresAt': '2099-03-01',
+          },
+        ),
+      );
+      expect(remembered.isError, isNot(true));
+      final id = _decodeToolJson(remembered)['id'];
+
+      final fetched = await connection.callTool(
+        CallToolRequest(name: 'get', arguments: {'id': id}),
+      );
+      final json = _decodeToolJson(fetched);
+      expect(json['expiresAt'], '2099-03-01T00:00:00.000Z');
+    },
+  );
+
+  test(
     'M-4 residual (2026-09-07 security-review re-verification): recall '
     'with a 1 MiB project filter is rejected as invalid_input, not '
     'forwarded whole to the store query',

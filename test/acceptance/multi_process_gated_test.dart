@@ -21,6 +21,15 @@
 /// Real subprocess spawning is inherently slower than in-process tests —
 /// explicit [Timeout] below rather than relying on the framework default
 /// (§14 MINOR).
+///
+/// 2026-09-21, areas and facts (0.3.0), WP6: extended with a second group
+/// covering `fact_set` instead of `remember` – same store.lock-per-call
+/// serialization (store_gate.dart), applied to the facts write path's own
+/// "read current row, write replacement" invariant (at most one current
+/// row per key). Reuses this file's `_dartExe`/`_nativeNoise`/`_WorkerRun`
+/// plumbing and the same real-subprocess pattern; adds
+/// test/helpers/gated_fact_writer_worker.dart and
+/// test/helpers/fact_reader_worker.dart.
 @Timeout(Duration(minutes: 3))
 library;
 
@@ -218,6 +227,117 @@ Future<List<_WorkerRun>> _runGatedWorkers(
   ]);
 }
 
+/// Spawns one gated_fact_writer_worker.dart instance – WP6 fact_set
+/// acceptance (plan §5 / addendum): `ownCount` writes to keys unique to
+/// this worker, then `sharedCount` writes to the ONE key every worker in
+/// the same test run contends on.
+Future<_WorkerRun> _runFactWorker({
+  required String storeDir,
+  required int ownCount,
+  required int sharedCount,
+  required String ledgerPath,
+  required String workerId,
+}) async {
+  final proc = await Process.start(_dartExe, [
+    'run',
+    'test/helpers/gated_fact_writer_worker.dart',
+    storeDir,
+    '$ownCount',
+    '$sharedCount',
+    ledgerPath,
+    workerId,
+  ]);
+  final stdoutLines = <String>[];
+  final stderrLines = <String>[];
+  final stdoutDone = proc.stdout
+      .transform(utf8.decoder)
+      .transform(const LineSplitter())
+      .forEach(stdoutLines.add);
+  final stderrDone = proc.stderr
+      .transform(utf8.decoder)
+      .transform(const LineSplitter())
+      .forEach(stderrLines.add);
+  final exitCode = await proc.exitCode;
+  await stdoutDone;
+  await stderrDone;
+  if (exitCode != 0) {
+    fail(
+      'fact worker $workerId exited $exitCode (expected 0).\n'
+      'stdout: $stdoutLines\nstderr: $stderrLines',
+    );
+  }
+  // Same raw-text substring check as _runWorker above, same reason:
+  // native sync-client chatter can land on stdout without a guaranteed
+  // newline boundary around our own DONE line (see _runWorker's doc).
+  if (!stdoutLines.join('\n').contains('DONE')) {
+    fail(
+      'fact worker $workerId never reported DONE on stdout – a worker '
+      'that exits 0 without reporting done is itself a harness failure '
+      'mode.\nstdout: $stdoutLines\nstderr: $stderrLines',
+    );
+  }
+  final ledgerFile = File(ledgerPath);
+  final lines =
+      ledgerFile.existsSync() ? await ledgerFile.readAsLines() : <String>[];
+  final ledger = [
+    for (final line in lines)
+      if (line.trim().isNotEmpty) jsonDecode(line) as Map<String, Object?>,
+  ];
+  return _WorkerRun(
+    workerId: workerId,
+    exitCode: exitCode,
+    stdoutLines: stdoutLines,
+    stderrLines: stderrLines,
+    ledger: ledger,
+  );
+}
+
+/// Spawns a THIRD, fresh process (test/helpers/fact_reader_worker.dart,
+/// never one of the writers) to read back every fact row for [project] –
+/// same cross-process-correctness rationale as
+/// `_countEntriesInFreshProcess` above.
+Future<Map<String, Object?>> _readFacts(String storeDir, String project) async {
+  final proc = await Process.start(_dartExe, [
+    'run',
+    'test/helpers/fact_reader_worker.dart',
+    storeDir,
+    project,
+  ]);
+  final stdout = await proc.stdout.transform(utf8.decoder).join();
+  final stderrText = await proc.stderr.transform(utf8.decoder).join();
+  final exitCode = await proc.exitCode;
+  if (exitCode != 0) {
+    fail(
+      'fact_reader_worker exited $exitCode.\nstdout: $stdout\n'
+      'stderr: $stderrText',
+    );
+  }
+  // Same "find the line that actually parses as our expected shape"
+  // approach as _countEntriesInFreshProcess, for the same reason: native
+  // sync-client log chatter can share stdout with our JSON line.
+  Map<String, Object?>? parsed;
+  for (final line in stdout.split('\n')) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty || !trimmed.startsWith('{')) continue;
+    try {
+      final decoded = jsonDecode(trimmed) as Map<String, Object?>;
+      if (decoded.containsKey('facts')) {
+        parsed = decoded;
+        break;
+      }
+    } on FormatException {
+      continue; // native log noise that happens to start with '{' – skip
+    }
+  }
+  if (parsed == null) {
+    fail(
+      'fact_reader_worker produced no line matching a fact_query result '
+      '(a "facts" key) on stdout.\nstdout: $stdout\nstderr: $stderrText',
+    );
+  }
+  return parsed;
+}
+
 void main() {
   group('multi-process gated-mode acceptance (WP6)', () {
     late Directory tempDir;
@@ -374,4 +494,187 @@ void main() {
           ? 'race demonstration, not deterministic on hosted CI runners – '
               'run locally'
           : false);
+
+  group('fact_set gated multi-process acceptance (WP6, areas and facts)', () {
+    late Directory tempDir;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync(
+        'remembox_acceptance_facts_',
+      );
+    });
+
+    tearDown(() {
+      tempDir.deleteSync(recursive: true);
+    });
+
+    test(
+      '2 processes x 15 own keys + 10 concurrent fact_set calls each on '
+      'the SAME shared key, then one final fact_set -> every own key has '
+      'exactly one current row, the shared key has exactly one current '
+      'row, and its full history forms one consistent chain ending at '
+      'that row (no lost writes, no dangling or duplicate links) – '
+      'deterministic because store.lock serializes every fact_set call '
+      'end to end (store_gate.dart), not because of scheduling luck',
+      () async {
+        const n = 2, ownCount = 15, sharedCount = 10;
+        const project = 'wp6-facts-acceptance';
+
+        final runs = await Future.wait([
+          for (var i = 0; i < n; i++)
+            _runFactWorker(
+              storeDir: tempDir.path,
+              ownCount: ownCount,
+              sharedCount: sharedCount,
+              ledgerPath: '${tempDir.path}.factledger_$i.jsonl',
+              workerId: 'f$i',
+            ),
+        ]);
+
+        var ownWrites = 0;
+        var sharedWrites = 0;
+        for (final run in runs) {
+          final own = run.ledger.where((e) => e['type'] == 'own').length;
+          final shared = run.ledger
+              .where((e) => e['type'] == 'shared')
+              .length;
+          expect(
+            own,
+            ownCount,
+            reason: 'worker ${run.workerId} must log exactly $ownCount own '
+                'writes – harness sanity check independent of the store',
+          );
+          expect(
+            shared,
+            sharedCount,
+            reason:
+                'worker ${run.workerId} must log exactly $sharedCount '
+                'shared writes',
+          );
+          ownWrites += own;
+          sharedWrites += shared;
+        }
+        expect(ownWrites, n * ownCount);
+        expect(sharedWrites, n * sharedCount);
+
+        // The plan's "repair path" capstone: ONE more fact_set on the
+        // shared key, run sequentially (awaited, not concurrent with the
+        // batch above) from a fresh process – guarantees the final state
+        // is exercised through the exact same "close whatever is current,
+        // write the new row" path a real conflict would take, rather than
+        // relying solely on the concurrent batch above having behaved.
+        final finalRun = await _runFactWorker(
+          storeDir: tempDir.path,
+          ownCount: 0,
+          sharedCount: 1,
+          ledgerPath: '${tempDir.path}.factledger_final.jsonl',
+          workerId: 'final',
+        );
+        expect(finalRun.ledger.length, 1);
+        sharedWrites += 1;
+
+        final result = await _readFacts(tempDir.path, project);
+        expect(
+          result['truncated'],
+          isFalse,
+          reason: 'the read-back query must not truncate, or the '
+              'assertions below would silently check a partial result',
+        );
+        final allFacts = (result['facts'] as List)
+            .cast<Map<String, Object?>>();
+
+        final ownFacts = allFacts
+            .where((f) => (f['subject'] as String).startsWith('worker-'))
+            .toList();
+        expect(
+          ownFacts.length,
+          ownWrites,
+          reason: 'every own-key write must have landed as its own row – '
+              'none lost, none merged',
+        );
+        expect(
+          ownFacts.every((f) => f['current'] == true),
+          isTrue,
+          reason: 'an own key is written exactly once, so its single row '
+              'must always be current',
+        );
+
+        final sharedFacts = allFacts
+            .where((f) => f['subject'] == 'shared-counter')
+            .toList();
+        expect(
+          sharedFacts.length,
+          sharedWrites,
+          reason: 'the shared key\'s full history must contain exactly one '
+              'row per fact_set call across both workers plus the final '
+              'call – a lost or duplicated write would change this count',
+        );
+
+        final currentShared = sharedFacts
+            .where((f) => f['current'] == true)
+            .toList();
+        expect(
+          currentShared.length,
+          1,
+          reason: 'exactly one row per key must be current at the end – '
+              'more than one is the cross-device-conflict shape fact_set '
+              'is supposed to repair, not something a correctly-serialized '
+              'run should ever produce',
+        );
+        final currentId = currentShared.single['id'];
+
+        // Consistent history chain: every non-current row must point
+        // forward (supersededBy) into a row that exists, and following
+        // that pointer from ANY row must terminate at the unique current
+        // row without ever revisiting a row (which would mean a cycle).
+        final byId = {
+          for (final f in sharedFacts) f['id'] as int: f,
+        };
+        for (final f in sharedFacts) {
+          if (f['current'] == true) {
+            expect(
+              f['supersededBy'],
+              isNull,
+              reason: 'the current row must not point to a successor',
+            );
+            continue;
+          }
+          expect(
+            f['supersededBy'],
+            isNotNull,
+            reason: 'fact ${f['id']} is not current but has no '
+                'supersededBy – a closed row without a forward link is a '
+                'dangling history entry',
+          );
+          expect(
+            byId.containsKey(f['supersededBy']),
+            isTrue,
+            reason: 'fact ${f['id']}\'s supersededBy (${f['supersededBy']}) '
+                'does not point at any row in this key\'s history',
+          );
+        }
+        for (final start in sharedFacts) {
+          var current = start;
+          final visited = <int>{};
+          while (current['supersededBy'] != null) {
+            final id = current['id'] as int;
+            expect(
+              visited.contains(id),
+              isFalse,
+              reason: 'cycle detected in the fact history chain at row '
+                  '$id, starting from ${start['id']}',
+            );
+            visited.add(id);
+            current = byId[current['supersededBy']]!;
+          }
+          expect(
+            current['id'],
+            currentId,
+            reason: 'the chain starting at ${start['id']} does not '
+                'terminate at the current row ($currentId)',
+          );
+        }
+      },
+    );
+  });
 }

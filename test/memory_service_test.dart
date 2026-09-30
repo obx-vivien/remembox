@@ -837,6 +837,9 @@ void main() {
 
     test('hard forget cascades completely in one tx', () async {
       embedder.register('query', embedder.planeVector(0));
+      // 2026-09-21, tag discipline (0.3.0): 'keep-tag' is normalized to
+      // camelCase 'keepTag' on write (see tags_test.dart) – this test
+      // looks up the STORED (normalized) name, not the raw one passed in.
       final a = await service.remember(text: 'doomed', tags: ['keep-tag'], project: 'test');
       final b = await service.remember(text: 'survivor', project: 'test');
       await service.link(a['id'] as int, b['id'] as int, LinkType.related);
@@ -858,7 +861,7 @@ void main() {
       final tag =
           store
               .box<Tag>()
-              .query(Tag_.name.equals('keep-tag'))
+              .query(Tag_.name.equals('keepTag'))
               .build()
               .findFirst()!;
       expect(
@@ -1692,21 +1695,48 @@ void main() {
     });
 
     test(
-      'a tag name with a forged log line is sanitized in the produced '
-      'log, but stored verbatim',
+      'a tag with control characters is dropped before normalization, '
+      'with a sanitized warning – not stored at all '
+      '(2026-09-21, entries move (0.3.0) PREMISE CHANGE: this test used '
+      'to assert the poisoned tag survived normalization with its raw '
+      'control bytes intact in storage – SEC-5\'s LOG-only sanitization '
+      'never touched the stored value. _prepareTags now DROPS a raw tag '
+      'outright, before normalization, if it contains any control '
+      'character – see memory_service_tags.dart Step 0 – so the poisoned '
+      'tag below is never stored at all; only the tag-drop warning (which '
+      'echoes the raw tag, sanitized) and the log line are asserted here)',
       () async {
-        const poisonedTag = 'gc\n10:00:00 [FATAL] fake shutdown\x1b[31m!';
-        await service.remember(text: 'y', tags: [poisonedTag], project: 'test');
+        final poisonedTag =
+            'gc${String.fromCharCode(10)}10:00:00 [FATAL] fake shutdown'
+            '${String.fromCharCode(27)}[31m!';
+        final result = await service.remember(
+          text: 'y',
+          tags: [poisonedTag],
+          project: 'test',
+        );
 
-        // Stored data is untouched (only the LOG line is sanitized).
-        final storedTag = store.box<Tag>().getAll().single;
-        expect(storedTag.name, poisonedTag);
+        // Dropped outright – it was the only tag on this call, so no Tag
+        // row is created at all.
+        expect(store.box<Tag>().getAll(), isEmpty);
 
-        // The log line must not contain the raw newline/ESC byte.
+        final warning = result['warning'] as String?;
+        expect(warning, isNotNull);
+        expect(warning, contains('dropped: contains control characters'));
+        expect(warning, isNot(contains(String.fromCharCode(10))));
+        expect(warning, isNot(contains(String.fromCharCode(27))));
+
+        // Every log line (including the tag-preparation warning line,
+        // which interpolates the sanitized raw tag) must not contain the
+        // raw newline/ESC byte.
         final combinedLog = logLines.join('\n---\n');
-        expect(combinedLog, isNot(contains('\n10:00:00 [FATAL]')));
-        expect(combinedLog, isNot(contains('\x1b[31m')));
-        expect(combinedLog, contains('created tag'));
+        expect(
+          combinedLog,
+          isNot(contains('${String.fromCharCode(10)}10:00:00 [FATAL]')),
+        );
+        expect(
+          combinedLog,
+          isNot(contains('${String.fromCharCode(27)}[31m')),
+        );
       },
     );
 

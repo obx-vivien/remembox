@@ -3,11 +3,23 @@ tags:
   # machines have no Ollama); run them with: dart test -P ollama
   ollama:
     skip: "Requires local Ollama — run with: dart test -P ollama"
+  # Wall-clock timing tests (facts, 2026-09-21, areas and facts (0.3.0)).
+  # Skipped by default — a wall-clock assertion in the default suite would
+  # be flaky on a loaded machine (plan review m11); run explicitly with:
+  # dart test -P perf
+  perf:
+    skip: "Wall-clock timing test — run with: dart test -P perf"
 
 presets:
   # dart test -P ollama  → actually run the Ollama integration tests.
   ollama:
     tags:
       ollama:
+        skip: false
+        timeout: 3m
+  # dart test -P perf  → actually run the timing tests.
+  perf:
+    tags:
+      perf:
         skip: false
         timeout: 3m

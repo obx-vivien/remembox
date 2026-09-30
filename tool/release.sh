@@ -7,7 +7,9 @@
 # data under ~/.remembox) can never leak into a published artifact.
 #
 # Steps (each logged `==>`, each fails loudly under `set -euo pipefail`):
-#   1. Refuse a dirty tree; print the commit being released.
+#   1. Refuse a dirty tree; print the commit being released. Validate the
+#      inputs of the acceptance test in step 8 (previous release zip, if
+#      given; Ollama reachable with the embedding model).
 #   2. `git archive HEAD` into a fresh staging dir — this is what honors
 #      `.gitattributes export-ignore` (internal dev-log/spike docs, see
 #      that file's header comment).
@@ -31,19 +33,64 @@
 #      run_trace_gate below for why), so this subsumes what used to be a
 #      separate binary-strings gate.
 #   6. Smoke-test the built launcher from a foreign cwd, gated mode.
-#   7. Write remembox-<version>-macos-arm64.zip into release/, print path,
-#      size, sha256.
+#   7. Build remembox-<version>-macos-arm64.zip – inside staging, not yet
+#      in release/.
+#   8. Acceptance test of that zip (tool/release_acceptance.sh – see its
+#      header for the full list of checks): unpack it and use the shipped
+#      launcher the way a user does.
+#        A. Fresh install on an empty store directory – tools/list against
+#           the tools registered in lib/src/server.dart, remember / recall,
+#           areas, facts, tags, stats. Always runs.
+#        B. Upgrade from the previous published release – its binary
+#           creates a store, the new binary takes it over, the old binary
+#           must then refuse it. Runs only when
+#           REMEMBOX_PREVIOUS_RELEASE_ZIP is set. Required for a real
+#           release (opt-out: REMEMBOX_SKIP_UPGRADE_SCENARIO=1); a dry run
+#           without it SKIPS B with a warning that is repeated at the very
+#           end of the run.
+#      Needs a local Ollama with the `embeddinggemma` model; that is
+#      checked up front (step 1) so a missing Ollama fails in seconds, not
+#      after the build. Any failed check aborts the release – nothing is
+#      written to release/.
+#   9. Move the accepted zip into release/, print path, size, sha256.
 #
 # Usage:
 #   tool/release.sh              # build the real zip
-#   tool/release.sh --dry-run    # everything except writing the zip
+#   tool/release.sh --dry-run    # everything, including the acceptance
+#                                # test of the staged zip, except step 9
 #
-# Required env:
-#   REMEMBOX_SKILL_MD=<path>     # path to the SKILL.md you want to ship
-#                                 # (the repo cannot know where it lives
-#                                 # on this machine), e.g.
-#                                 # REMEMBOX_SKILL_MD=/path/to/SKILL.md
+#   # a real release – with the upgrade test against the last published zip:
+#   REMEMBOX_PREVIOUS_RELEASE_ZIP=release/remembox-0.2.0-macos-arm64.zip \
+#     tool/release.sh
+#
 # Optional env:
+#   REMEMBOX_PREVIOUS_RELEASE_ZIP=<path>
+#                                 # zip of the previously PUBLISHED release,
+#                                 # for acceptance scenario B (relative
+#                                 # paths resolve against the repository
+#                                 # root). REQUIRED for a real (non-dry) run:
+#                                 # unset aborts the release before the
+#                                 # build, unless REMEMBOX_SKIP_UPGRADE_SCENARIO=1.
+#                                 # A --dry-run without it skips B, loudly.
+#                                 # Set but not a file: the release aborts.
+#   REMEMBOX_SKIP_UPGRADE_SCENARIO=1
+#                                 # explicit opt-out of the previous-release
+#                                 # requirement above (e.g. the very first
+#                                 # release). Skips B with a loud WARNING,
+#                                 # repeated at the end of the run.
+#   REMEMBOX_DOWNGRADE=refused|opens
+#                                 # what the previous release must do with
+#                                 # a store the new one has opened. Default
+#                                 # `refused` (schema changed). Set `opens`
+#                                 # for a release without a schema change –
+#                                 # see tool/release_acceptance.sh.
+#   REMEMBOX_SKILL_MD=<path>     # override the SKILL.md to ship; defaults
+#                                 # to the repo's own skill/SKILL.md (read
+#                                 # from the staged git archive tree, so the
+#                                 # shipped skill is exactly the committed
+#                                 # one). Set this only to ship a different
+#                                 # file, e.g.
+#                                 # REMEMBOX_SKILL_MD=/path/to/SKILL.md
 #   DART=<path to dart>          # defaults to `dart` on PATH, same as
 #                                 # tool/setup.sh / tool/build.sh
 set -euo pipefail
@@ -198,24 +245,59 @@ fi
 RELEASE_COMMIT="$(git rev-parse HEAD)"
 echo "==> Releasing commit $RELEASE_COMMIT"
 
-if [ -z "${REMEMBOX_SKILL_MD:-}" ]; then
-  echo "ERROR: REMEMBOX_SKILL_MD is not set. Point it at the SKILL.md you" >&2
-  echo "       want to ship, e.g.:" >&2
-  echo "       REMEMBOX_SKILL_MD=/path/to/SKILL.md tool/release.sh" >&2
+if [ -n "${REMEMBOX_SKILL_MD:-}" ]; then
+  if [ ! -f "$REMEMBOX_SKILL_MD" ]; then
+    echo "ERROR: REMEMBOX_SKILL_MD does not point to a file: $REMEMBOX_SKILL_MD" >&2
+    exit 1
+  fi
+  echo "==> Skill file: $REMEMBOX_SKILL_MD (override)"
+  echo "WARNING: shipping a skill file OUTSIDE the repo ($REMEMBOX_SKILL_MD)" >&2
+  echo "         instead of the repo's own committed skill/SKILL.md – the" >&2
+  echo "         published ZIP will not match what is in version control." >&2
+else
+  echo "==> Skill file: repo's own skill/SKILL.md (default, from the staged git archive)"
+fi
+
+# Acceptance-test inputs (step 8), validated here so a typo or a stopped
+# Ollama aborts now instead of after the whole build.
+PREVIOUS_ZIP=""
+if [ -n "${REMEMBOX_PREVIOUS_RELEASE_ZIP:-}" ]; then
+  if [ ! -f "$REMEMBOX_PREVIOUS_RELEASE_ZIP" ]; then
+    echo "ERROR: REMEMBOX_PREVIOUS_RELEASE_ZIP does not point to a file: $REMEMBOX_PREVIOUS_RELEASE_ZIP" >&2
+    exit 1
+  fi
+  PREVIOUS_ZIP="$(cd "$(dirname "$REMEMBOX_PREVIOUS_RELEASE_ZIP")" && pwd)/$(basename "$REMEMBOX_PREVIOUS_RELEASE_ZIP")"
+  echo "==> Previous release for the upgrade acceptance test: $PREVIOUS_ZIP"
+elif [ "$DRY_RUN" = false ] && [ "${REMEMBOX_SKIP_UPGRADE_SCENARIO:-}" != "1" ]; then
+  # A real release must prove that existing stores survive the upgrade.
+  echo "ERROR: REMEMBOX_PREVIOUS_RELEASE_ZIP is not set." >&2
+  echo "       A real release needs the previously PUBLISHED zip for the upgrade" >&2
+  echo "       acceptance test (scenario B). Set REMEMBOX_PREVIOUS_RELEASE_ZIP to" >&2
+  echo "       it, or set REMEMBOX_SKIP_UPGRADE_SCENARIO=1 to release without that" >&2
+  echo "       test (e.g. for the very first release). Release ABORTED before the build." >&2
+  exit 1
+else
+  if [ "$DRY_RUN" = false ]; then
+    echo "WARNING: REMEMBOX_SKIP_UPGRADE_SCENARIO=1 – the upgrade acceptance test" >&2
+    echo "         (scenario B) is deliberately SKIPPED for this REAL release." >&2
+  else
+    echo "WARNING: REMEMBOX_PREVIOUS_RELEASE_ZIP is not set – the upgrade" >&2
+  fi
+  echo "         acceptance test (scenario B) will be SKIPPED; only a fresh" >&2
+  echo "         install of this build gets tested." >&2
+fi
+echo "==> Acceptance preflight: Ollama + embedding model"
+if ! DART="$DART" "$REPO_ROOT/tool/release_acceptance.sh" --preflight; then
+  echo "ERROR: the acceptance test (step 8) cannot run – release ABORTED before the build." >&2
   exit 1
 fi
-if [ ! -f "$REMEMBOX_SKILL_MD" ]; then
-  echo "ERROR: REMEMBOX_SKILL_MD does not point to a file: $REMEMBOX_SKILL_MD" >&2
-  exit 1
-fi
-echo "==> Skill file: $REMEMBOX_SKILL_MD"
 
 # --- 2. git archive into a fresh staging dir -------------------------------
 # Staging lives under a fixed /tmp prefix, not the default mktemp base
-# (macOS: a per-user the per-user macOS temp folder token). `dart compile` embeds the
-# compile-time script path (Platform.script) into the AOT binary, so a
-# default-base staging dir would bake that per-user/per-machine token into
-# every shipped binary. /tmp/remembox-release.XXXXXX keeps the embedded
+# (macOS's default temp folder path embeds a per-user token). `dart compile`
+# embeds the compile-time script path (Platform.script) into the AOT binary,
+# so a default-base staging dir would bake that per-user/per-machine token
+# into every shipped binary. /tmp/remembox-release.XXXXXX keeps the embedded
 # path generic.
 STAGE_PARENT="$(mktemp -d /tmp/remembox-release.XXXXXX)"
 STAGE="$STAGE_PARENT/remembox"
@@ -295,8 +377,20 @@ echo "==> Built: $STAGE/dist (lib: $(basename "$LIB_BUILT"))"
 #   README.md
 echo "==> Assembling release layout"
 mkdir -p "$STAGE/skill"
-cp "$REMEMBOX_SKILL_MD" "$STAGE/skill/SKILL.md"
-# Normalise the mode: REMEMBOX_SKILL_MD may point at a file with a
+if [ -n "${REMEMBOX_SKILL_MD:-}" ]; then
+  # Override: ship the maintainer-supplied file instead of the repo's own.
+  cp "$REMEMBOX_SKILL_MD" "$STAGE/skill/SKILL.md"
+else
+  # Default: skill/SKILL.md already arrived in $STAGE via the git archive
+  # in step 2 – it is the repo's own tracked file, so no copy is needed.
+  # Still verified explicitly (like the LICENSE/README checks below) so a
+  # release never ships silently without a skill file.
+  if [ ! -f "$STAGE/skill/SKILL.md" ]; then
+    echo "ERROR: no skill/SKILL.md in the archived tree and REMEMBOX_SKILL_MD is not set" >&2
+    exit 1
+  fi
+fi
+# Normalise the mode: a custom REMEMBOX_SKILL_MD may point at a file with a
 # restrictive mode in its source location (e.g. 0600) — that mode would
 # otherwise leak into the ZIP as a small fingerprint of a private folder.
 chmod 644 "$STAGE/skill/SKILL.md"
@@ -400,7 +494,7 @@ else
   exit 1
 fi
 
-# --- 7. Write the zip --------------------------------------------------------
+# --- 7. Build the zip (in staging) ---------------------------------------------
 VERSION="$(grep -m1 '^version:' "$REPO_ROOT/pubspec.yaml" | sed -E 's/^version:[[:space:]]*//')"
 if [ -z "$VERSION" ]; then
   echo "ERROR: could not read version: from pubspec.yaml" >&2
@@ -408,18 +502,55 @@ if [ -z "$VERSION" ]; then
 fi
 ZIP_NAME="remembox-${VERSION}-macos-arm64.zip"
 RELEASE_DIR="$REPO_ROOT/release"
-mkdir -p "$RELEASE_DIR"
 ZIP_PATH="$RELEASE_DIR/$ZIP_NAME"
+# Not written to release/ yet: a zip only lands there after it passed the
+# acceptance test below, so release/ never holds an unaccepted build of
+# this run.
+STAGED_ZIP="$STAGE_PARENT/$ZIP_NAME"
+echo "==> Building $ZIP_NAME (staged)"
+(cd "$STAGE_PARENT" && zip -r -q -X "$STAGED_ZIP" "remembox")
 
+# --- 8. Acceptance test of the zip -------------------------------------------
+# The smoke test above proves the launcher answers `initialize`. This step
+# uses the artifact like a user: unpack the ZIP, start its launcher over
+# stdio, and store / recall / reorganise real data – on a fresh store and,
+# given the previous release, on a store that release created. It runs
+# against the zip itself (not $STAGE), so whatever the zip step could break
+# (layout, executable bits) is covered too. The script comes from the
+# worktree, which step 1 verified to be exactly the commit being released.
+echo "==> Acceptance test: $ZIP_NAME, unpacked and used like an install"
+ACCEPTANCE_ARGS=("$STAGED_ZIP")
+if [ -n "$PREVIOUS_ZIP" ]; then
+  ACCEPTANCE_ARGS+=("$PREVIOUS_ZIP")
+fi
+if ! DART="$DART" "$REPO_ROOT/tool/release_acceptance.sh" "${ACCEPTANCE_ARGS[@]}"; then
+  echo "ERROR: acceptance test FAILED – release ABORTED, nothing was written to $RELEASE_DIR." >&2
+  exit 1
+fi
+
+# Repeated at the end on purpose: the skip must be the last thing on
+# screen, not something that scrolled away above the acceptance output.
+warn_if_upgrade_untested() {
+  if [ -z "$PREVIOUS_ZIP" ]; then
+    echo "WARNING: upgrade acceptance test SKIPPED – no REMEMBOX_PREVIOUS_RELEASE_ZIP" >&2
+    echo "         was given. Upgrading an existing store to this build is" >&2
+    echo "         UNTESTED; re-run with the previously published zip before" >&2
+    echo "         publishing." >&2
+  fi
+}
+
+# --- 9. Move the accepted zip into release/ ------------------------------------
 if [ "$DRY_RUN" = true ]; then
-  echo "==> --dry-run: skipping zip write ($ZIP_PATH not created)"
+  echo "==> --dry-run: zip built and accepted in staging, not written ($ZIP_PATH not created)"
+  warn_if_upgrade_untested
   echo "==> Dry run complete."
   exit 0
 fi
 
 echo "==> Writing $ZIP_PATH"
+mkdir -p "$RELEASE_DIR"
 rm -f "$ZIP_PATH"
-(cd "$STAGE_PARENT" && zip -r -q -X "$ZIP_PATH" "remembox")
+mv "$STAGED_ZIP" "$ZIP_PATH"
 
 ZIP_SIZE="$(du -h "$ZIP_PATH" | cut -f1)"
 ZIP_SHA="$(shasum -a 256 "$ZIP_PATH" | cut -d' ' -f1)"
@@ -428,3 +559,4 @@ echo "==> Release built:"
 echo "    path:   $ZIP_PATH"
 echo "    size:   $ZIP_SIZE"
 echo "    sha256: $ZIP_SHA"
+warn_if_upgrade_untested

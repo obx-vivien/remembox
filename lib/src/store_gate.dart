@@ -53,10 +53,13 @@ import '../objectbox.g.dart';
 import 'model.dart';
 import 'store.dart';
 
-/// One open [Store] plus its five boxes, bundled together so
+/// One open [Store] plus its nine boxes, bundled together so
 /// [MemoryService] never has to call `store.box<T>()` itself. Built fresh on
 /// every [StoreGate] lending in gated mode; built exactly once (at
 /// [StoreGate.persistent] construction) in persistent mode.
+///
+/// 2026-09-21, areas and facts (0.3.0): added [projects]/[areas]/
+/// [memberships]/[facts] alongside the original five boxes.
 class StoreSession {
   final Store store;
   final Box<MemoryEntry> entries;
@@ -64,13 +67,21 @@ class StoreSession {
   final Box<SourceDocument> docs;
   final Box<MemoryLink> links;
   final Box<MemoryIndex> index;
+  final Box<ProjectScope> projects;
+  final Box<Area> areas;
+  final Box<AreaMembership> memberships;
+  final Box<Fact> facts;
 
   StoreSession(this.store)
     : entries = store.box<MemoryEntry>(),
       tags = store.box<Tag>(),
       docs = store.box<SourceDocument>(),
       links = store.box<MemoryLink>(),
-      index = store.box<MemoryIndex>();
+      index = store.box<MemoryIndex>(),
+      projects = store.box<ProjectScope>(),
+      areas = store.box<Area>(),
+      memberships = store.box<AreaMembership>(),
+      facts = store.box<Fact>();
 }
 
 /// Zone key marking "we are inside an executing [StoreGate.withStore]

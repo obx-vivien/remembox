@@ -289,6 +289,21 @@ void main() {
         final gate = await StoreGate.gated(
           storeDirectory: tempDir.path,
           log: logCapture,
+          // Flake fix 2026-09-30: this test used the default 200ms
+          // threshold and was timing-dependent. `wait` is not only the
+          // store.lock acquisition – StoreGate._acquireRunRelease reads the
+          // wait stopwatch after _acquireSession returns, so it also covers
+          // the store open and the sync-client start. On a loaded machine
+          // (full suite next to other ObjectBox processes; 2 of 5
+          // full-suite runs on 2026-09-23 and 2026-09-26) that crossed
+          // 200ms, the gate correctly took its WARN branch ("probe-op
+          // wait=237ms exceeded the 200ms threshold (hold=20ms) ...") and
+          // there was no normal line for this test to find. Which branch
+          // runs is decided by `waitMs > waitWarnThreshold` alone, so a
+          // threshold far above the test timeout pins the normal branch
+          // regardless of machine load – no retry, no sleep. The WARN
+          // branch keeps its own deterministic test below (zero threshold).
+          waitWarnThreshold: const Duration(hours: 1),
         );
         addTearDown(gate.close);
         await gate.withStore('probe-op', (session) async {
@@ -300,6 +315,13 @@ void main() {
           orElse: () => fail('no wait/hold line found: $logLines'),
         );
         expect(line, matches(RegExp(r'^\[gate\] probe-op wait=\d+ms hold=\d+ms$')));
+        expect(
+          logLines.where((l) => l.contains('WARN') && l.contains('probe-op')),
+          isEmpty,
+          reason:
+              'below the threshold the gate must log the plain line only, '
+              'never a WARN for the same call: $logLines',
+        );
       },
     );
 

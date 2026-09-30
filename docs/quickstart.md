@@ -119,7 +119,44 @@ don't replace the whole file, or the other entries will be lost.
 Save, then fully quit and reopen Claude Desktop (`⌘Q`, not just closing
 the window).
 
-## Step 5: Test it 🎉
+## Step 5: Make the rules load in every session
+
+This step is what makes RememBox work reliably, so please don't skip it.
+Claude only follows RememBox's usage rules if it gets them at the start of
+**every** session. Without them, sessions tend to invent a new spelling of
+the same project name, use one name in one app and another in the next, or
+tidy up your memory when nobody asked. The skill from Step 7 can't do this
+alone: a skill is only loaded when the topic seems to match, so it is not
+guaranteed to be there.
+
+Where the text goes depends on the app – it has to be a place that is
+loaded every time:
+
+- **Claude Desktop, Cowork, claude.ai in the browser, and the mobile app:**
+  open claude.ai → **Settings → Account** and paste the block below into
+  the field **Instructions for Claude**. Claude applies it to all
+  conversations, so it is there at the start of every chat and every
+  Cowork session. (In some app versions the field appeared as
+  "personal preferences"; Cowork's former "Global instructions" now live
+  here too.)
+- **Claude Code:** paste the same block into the file
+  `~/.claude/CLAUDE.md` (create it if it doesn't exist). Claude Code reads this
+  file at the start of every session, and the other apps don't read it –
+  so if you use both, paste the block in both places.
+
+```text
+Memory (RememBox): Before any non-trivial task, call recall first; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Before using a new project name, call areas_list and pick an existing one. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry, check tags_list first; never use a project name, an area name or an identifier as a tag. Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+```
+
+Replace the project list (`family, private, …`) with your own – short,
+stable names for the areas of your life or work you want to keep apart.
+Keep the block short, because it is loaded into every chat, and keep both
+places identical whenever you change the list. Changes reliably apply to
+new sessions – start a new chat after editing. The
+[usage guide](usage-guide.md#6-making-the-rules-load-every-time) explains
+the details.
+
+## Step 6: Test it 🎉
 
 1. Start a **new** Claude session and say:
    > Remember that my favorite project is X.
@@ -134,12 +171,13 @@ The very first time, RememBox may briefly need to pull the language model
 a short get-to-know-you interview. It's worth doing: the more Claude knows
 about you, the more useful the memory becomes.
 
-## Step 6 (optional): Make remembering a habit for Claude
+## Step 7 (optional): Add the detailed skill
 
 The downloaded `remembox` folder already includes a skill file
-(`skill/SKILL.md`) that teaches Claude to use the memory on its own –
-looking things up at the start of every session and saving what matters at
-the end, without you having to ask.
+(`skill/SKILL.md`) with the long version of the rules – looking things up
+at the start of a session and saving what matters at the end, plus the
+details on facts, areas and tags. It supplements the block from Step 5; it
+doesn't replace it.
 
 For Claude Code, install it with two lines in the Terminal:
 
@@ -150,8 +188,10 @@ cp ~/remembox/skill/SKILL.md ~/.claude/skills/remembox-memory/SKILL.md
 
 (Adjust the path as usual if your folder lives elsewhere.)
 
-The memory works fine without this step too – Claude will just use it less
-on its own.
+The memory works without this step too – Claude then has only the short
+block from Step 5 to go on, without the details. (Claude Desktop and Cowork
+take the same file as a personal skill upload in the app's skill
+settings.)
 
 ---
 
@@ -196,7 +236,7 @@ programs downloaded from the internet. Two ways to fix it:
   Security**, scroll down, and click **Open Anyway** next to the RememBox
   message.
 
-Then repeat the test from Step 5.
+Then repeat the test from Step 6.
 
 **Claude says it doesn't know a tool for remembering, or "Failed to
 connect"**
@@ -212,8 +252,8 @@ connections keep holding on to the old version.
 **Claude says "project is required" or similar**
 This is **not a bug** – it's intentional: RememBox requires every memory
 to have a project, so later searches can filter by it precisely. With the
-skill file from Step 6, Claude sets this automatically; without the
-skill, just tell Claude which project the memory belongs to (e.g. "...
+block from Step 5, Claude sets this automatically; without it,
+just tell Claude which project the memory belongs to (e.g. "...
 project: my garden blog").
 
 **Something else?**

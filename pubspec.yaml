@@ -4,7 +4,7 @@ description: >-
   backed by ObjectBox with HNSW vector search. Pure Dart; stdio transport
   (one process per client) and a streamable-HTTP singleton daemon transport
   (one process, many concurrent sessions).
-version: 0.2.0
+version: 0.3.1
 publish_to: none
 
 environment:

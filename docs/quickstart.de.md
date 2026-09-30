@@ -124,7 +124,46 @@ gehen die anderen Einträge verloren.
 Speichern, dann Claude Desktop **komplett beenden und neu starten**
 (`⌘Q`, nicht nur das Fenster schließen).
 
-## Schritt 5: Funktionstest 🎉
+## Schritt 5: Die Regeln in jeder Sitzung laden lassen
+
+Dieser Schritt macht RememBox erst verlässlich, bitte nicht überspringen.
+Claude hält sich nur dann an die Nutzungsregeln von RememBox, wenn es sie
+am Anfang **jeder** Sitzung bekommt. Ohne sie erfindet Claude gern neue
+Schreibweisen für denselben Projektnamen, benutzt in einer App den einen
+Namen und in der nächsten einen anderen oder räumt dein Gedächtnis auf,
+ohne dass jemand darum gebeten hat. Der Skill aus Schritt 7 kann das nicht
+allein leisten: Ein Skill wird nur geladen, wenn das Thema zu passen
+scheint – dass er da ist, ist nicht garantiert.
+
+Wohin der Text kommt, hängt von der App ab – es muss ein Ort sein, der
+jedes Mal geladen wird:
+
+- **Claude Desktop, Cowork, claude.ai im Browser und die Mobile-App:**
+  Öffne claude.ai → **Einstellungen → Account** und füge den Block unten in
+  das Feld **Instructions for Claude** ein (die Oberfläche zeigt die
+  englische Bezeichnung). Claude wendet es auf alle Unterhaltungen an, es
+  ist also am Anfang jedes Chats und jeder Cowork-Sitzung da. (In manchen
+  App-Versionen hieß das Feld „persönliche Präferenzen"; die früheren
+  „Global instructions" von Cowork stehen jetzt ebenfalls dort.)
+- **Claude Code:** Füge denselben Block in die Datei
+  `~/.claude/CLAUDE.md` ein (leg sie an, falls sie fehlt). Claude Code liest
+  diese Datei zu Beginn jeder Sitzung, die anderen Apps lesen sie nicht –
+  wenn du beides nutzt, trag den Block also an beiden Stellen ein.
+
+```text
+Gedächtnis (RememBox): Vor jeder nicht-trivialen Aufgabe zuerst recall aufrufen, Ergebnisse danach speichern. `project` ist Pflicht und stammt aus einer festen Namensliste – z. B. familie, privat, katzen, firma1, firma2, finanzen (durch deine eigene Liste ersetzen). Bevor du einen neuen Projektnamen benutzt, ruf areas_list auf und nimm einen vorhandenen. Exakte Werte, die sich mit der Zeit ändern (eine Miete, eine Adresse, eine Stufe), gehören in fact_set, alles andere in remember. Tags: camelCase, 3–5 pro Eintrag, vorher tags_list prüfen; nie einen Projektnamen, einen Bereichsnamen oder eine Kennung als Tag verwenden. Pflege-Werkzeuge (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) nur, wenn ich es ausdrücklich verlange.
+```
+
+Ersetze die Projektliste (`familie, privat, …`) durch deine eigene –
+kurze, feste Namen für die Lebens- und Arbeitsbereiche, die du getrennt
+halten willst. Halte den Block kurz, denn er wird in jeden Chat geladen,
+und halte beide Stellen identisch, sobald du die Liste änderst. Änderungen
+gelten verlässlich für neue Sitzungen – nach dem Bearbeiten einen neuen
+Chat beginnen. Die Einzelheiten stehen im
+[Nutzungshandbuch](usage-guide.md#6-making-the-rules-load-every-time)
+(auf Englisch).
+
+## Schritt 6: Funktionstest 🎉
 
 1. Starte eine **neue** Claude-Sitzung und schreibe:
    > Merk dir: Mein Lieblingsprojekt ist X.
@@ -140,12 +179,13 @@ Beim allerersten Mal kann RememBox noch kurz das Sprachmodell nachladen
 bietet dir vielleicht auch ein kurzes Kennenlern-Interview an. Das lohnt
 sich: je mehr Claude über dich weiß, desto nützlicher wird das Gedächtnis.
 
-## Schritt 6 (optional): Claude das Erinnern zur Gewohnheit machen
+## Schritt 7 (optional): Den ausführlichen Skill hinzufügen
 
 Im heruntergeladenen `remembox`-Ordner liegt bereits eine Skill-Datei
-(`skill/SKILL.md`), die Claude beibringt, das Gedächtnis von sich aus zu
-nutzen – am Anfang jeder Sitzung nachzuschlagen und am Ende Wichtiges zu
-speichern, ohne dass du extra danach fragen musst.
+(`skill/SKILL.md`) mit der ausführlichen Fassung der Regeln – am Anfang
+einer Sitzung nachschlagen, am Ende Wichtiges speichern, dazu die Details
+zu Fakten, Bereichen und Tags. Sie ergänzt den Block aus Schritt 5, ersetzt
+ihn aber nicht.
 
 Für Claude Code installierst du sie mit zwei Zeilen im Terminal:
 
@@ -156,8 +196,10 @@ cp ~/remembox/skill/SKILL.md ~/.claude/skills/remembox-memory/SKILL.md
 
 (Pfad wie immer anpassen, falls der Ordner woanders liegt.)
 
-Auch ohne diesen Schritt funktioniert das Gedächtnis – Claude nutzt es dann
-nur weniger von allein.
+Auch ohne diesen Schritt funktioniert das Gedächtnis – Claude hat dann nur
+den kurzen Block aus Schritt 5, ohne die Details. (Claude Desktop und
+Cowork nehmen dieselbe Datei als persönlichen Skill-Upload in den
+Skill-Einstellungen der App.)
 
 ---
 
@@ -202,7 +244,7 @@ zu lösen:
   Datenschutz & Sicherheit**, dort nach unten scrollen und bei der
   RememBox-Meldung auf **Dennoch erlauben** klicken.
 
-Danach den Funktionstest aus Schritt 5 wiederholen.
+Danach den Funktionstest aus Schritt 6 wiederholen.
 
 **Claude sagt, es kenne kein Werkzeug zum Merken, oder „Failed to
 connect"**
@@ -219,8 +261,8 @@ bereits laufende Verbindungen halten sonst weiter die alte Version fest.
 **Claude meldet „project is required" oder Ähnliches**
 Das ist **kein Fehler**, sondern Absicht: RememBox verlangt zu jeder
 Erinnerung ein Projekt, damit spätere Suchen gezielt danach filtern
-können. Mit der Skill-Datei aus Schritt 6 setzt Claude das automatisch;
-ohne Skill sag Claude einfach dazu, zu welchem Projekt die Erinnerung
+können. Mit dem Block aus Schritt 5 setzt Claude das automatisch;
+ohne ihn sag Claude einfach dazu, zu welchem Projekt die Erinnerung
 gehört (z. B. „... Projekt: mein Gartenblog").
 
 **Etwas anderes?**

@@ -10,13 +10,23 @@
 #      launcher caps `ulimit -n` (reproduced 2026-07-07; see the
 #      2026-07-06 engineering log (internal), section on OBX 10098).
 #
-# Usage: tool/smoke.sh   (after tool/build.sh; needs no Ollama — initialize
-# only, tools are not called)
+# Usage: tool/smoke.sh [<launcher>]
+#   <launcher> defaults to this checkout's dist/remembox (after
+#   tool/build.sh). tool/release_acceptance.sh passes the launcher of an
+#   unpacked release zip instead, so the shipped artifact gets the same two
+#   checks. Needs no Ollama – initialize only, tools are not called (and
+#   OBX_MEMORY_AUTO_PULL=false keeps startup from downloading a model).
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
-LAUNCHER="$(pwd)/dist/remembox"
-[ -x "$LAUNCHER" ] || { echo "FAIL: dist/remembox missing — run tool/build.sh"; exit 1; }
+if [ -n "${1:-}" ]; then
+  # Resolved against the caller's cwd – check() below runs from /tmp.
+  [ -x "$1" ] || { echo "FAIL: no executable launcher at $1"; exit 1; }
+  LAUNCHER="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+else
+  cd "$(dirname "$0")/.."
+  LAUNCHER="$(pwd)/dist/remembox"
+  [ -x "$LAUNCHER" ] || { echo "FAIL: dist/remembox missing – run tool/build.sh"; exit 1; }
+fi
 
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
 STORE_DIR="$(mktemp -d /tmp/remembox-smoke.XXXXXX)"
@@ -25,7 +35,7 @@ fail=0
 check() { # name, precmd
   local name="$1" precmd="$2" out
   out=$(cd /tmp && eval "$precmd"; printf '%s\n' "$INIT" \
-    | OBX_MEMORY_DIR="$STORE_DIR" "$LAUNCHER" 2>"$STORE_DIR/err-$name.log" | head -1)
+    | OBX_MEMORY_DIR="$STORE_DIR" OBX_MEMORY_AUTO_PULL=false "$LAUNCHER" 2>"$STORE_DIR/err-$name.log" | head -1)
   if printf '%s' "$out" | grep -q '"serverInfo"'; then
     echo "PASS: $name"
   else

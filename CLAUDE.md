@@ -26,6 +26,50 @@ Non-negotiables from the contract, enforced throughout this repo:
 - `project` is required on every stored entry and validated server-side –
   `recall` filters by `project` only; tags are labels, not a filter.
 
+## Areas and facts (0.3.0): `ProjectScope`, `Area`, `AreaMembership`, `Fact`
+
+- **Additive-only schema.** These four entities were added alongside the
+  original four – `MemoryEntry` and every pre-0.3.0 entity stayed
+  byte-for-byte unchanged (same ids, same properties). Any future change to
+  this area of the schema keeps the same discipline: add, never rewrite an
+  existing entity/property in place.
+- **`kFactKeySep` is an escape sequence, never a raw control character in
+  source.** It is `\u001f` (INFORMATION SEPARATOR ONE), written as an
+  escaped code point in `model.dart` on purpose – a raw control byte in a
+  source file is easy to mis-paste and invisible in a diff. `project`/
+  `subject`/`attribute`/area and project names reject this character
+  outright on every write path, so no caller can forge a composite key
+  (`Fact.factKey`, `AreaMembership.key`) by embedding the separator itself.
+- **Project and area names are byte-exact and case-sensitive.** `acme-app`
+  and `Acme-App` are two distinct registered names until an operator runs
+  `project_merge`. Every string `distinct`/`oneOf`/`equals` query over a
+  project or area name sets `caseSensitive = true` explicitly, as a
+  safeguard – do NOT rely on this being ObjectBox's default; do not remove
+  the explicit flag on the assumption that it is redundant, and do not
+  claim in comments or docs that ObjectBox would otherwise merge case
+  variants (it would not: `Query.property()` already inherits the store's
+  own case-sensitive default – the explicit flag is belt-and-braces, not a
+  correction of different default behavior).
+- **One current fact per key, enforced by the write path.** `Fact.factKey`
+  is deliberately not `@Unique` (a Sync-mandated replace on a unique key
+  would delete history instead of closing it – see
+  [docs/architecture.md](docs/architecture.md)). The "at most one row with
+  `validUntil == null && retractedAt == null` per `factKey`" invariant is
+  therefore a write-path responsibility (query-first inside one write
+  transaction in `lib/src/memory_service_facts.dart`), not a schema
+  constraint – keep it that way, and keep the duplicate-repair path that
+  detects and fixes a transient two-current-rows case explicitly rather
+  than picking one silently.
+
+## Tags (0.3.0): `_prepareTags`
+
+`_prepareTags` (`lib/src/memory_service_tags.dart`) is the SINGLE entry
+point for tag normalization/redundancy/warning logic – every write path
+that attaches tags (`remember` directly, `supersede` indirectly via
+`remember`) goes through it. Do not duplicate any part of its rules
+(camelCase normalization, redundancy against project/kind/area, near-
+duplicate detection, identifier/version warnings) at another call site.
+
 ## Dev-log citations in comments
 
 Code comments, tests and scripts cite the maintainer's internal engineering
@@ -132,8 +176,16 @@ tool/release.sh               # from-scratch release ZIP: git archive HEAD (neve
                               # then again over the final assembled tree incl.
                               # compiled binaries; fails closed on a missing or
                               # unusable denylist) + fresh dylib download + build
-                              # + smoke test; REMEMBOX_SKILL_MD=<path> required;
-                              # --dry-run skips writing the zip (output: release/)
+                              # + smoke test + acceptance test of the zip
+                              # (tool/release_acceptance.sh: fresh install,
+                              # and the upgrade from the previous release
+                              # when REMEMBOX_PREVIOUS_RELEASE_ZIP=<zip> is
+                              # set – needs a local Ollama with
+                              # embeddinggemma); REMEMBOX_SKILL_MD=<path>
+                              # optional; --dry-run does all of it except
+                              # writing the zip (output: release/)
+tool/release_acceptance.sh <new.zip> [<previous.zip>]
+                              # the acceptance test on its own, any zip
 ```
 
 Smoke test after any deployment-related change (must print an initialize

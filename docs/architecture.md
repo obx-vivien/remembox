@@ -11,9 +11,12 @@ Claude ◄───────────────────────�
                                         │          │ @Sync  MemoryEntry ─┬─ ToMany → Tag
                               MemoryService        │ @Sync  SourceDocument ◄──┘ ToOne
                                 │       │          │ @Sync  MemoryLink (typed edges)
-                       Embedder │       │          │ ─────────────────────────
-                     (Ollama /api/embed)│          │ local  MemoryIndex        │
-                                        └────────► │        (HNSW 768, cosine) │
+                       Embedder │       │          │ @Sync  ProjectScope, Area
+                     (Ollama /api/embed)│          │ @Sync  AreaMembership (name-keyed link)
+                                        │          │ @Sync  Fact ─ToOne→ MemoryEntry (explainedBy)
+                                        │          │ ─────────────────────────
+                                        └────────► │ local  MemoryIndex        │
+                                                   │        (HNSW 768, cosine) │
                                                    └───────────────────────────┘
 ```
 
@@ -50,6 +53,53 @@ call, and how that is derived automatically) and what that means
 operationally, see the README's
 [One store, multiple Claude windows](../README.md#one-store-multiple-claude-windows)
 section.
+
+## Areas and facts (0.3.0)
+
+Four entities were added on top of the original four: `ProjectScope` (one
+row per project name, holding its description/status), `Area` (a named
+group), `AreaMembership` (which project belongs to which area) and `Fact`
+(an exact, structured value with history). All four are `@Sync()` – they
+are durable, user-visible records, same rationale as the original domain
+entities.
+
+**Membership is a link entity keyed by names, not a `ToMany`.** The
+obvious design – `ProjectScope.areas` as a `ToMany<Area>` – breaks under
+Sync: ObjectBox Sync requires `@Unique(onConflict: ConflictStrategy.replace)`
+on every unique property of a synced entity, so a cross-device replace of
+`ProjectScope.name` or `Area.name` mints a new local id, silently dropping
+every relation row that pointed at the old one. `AreaMembership` avoids
+this by keying itself on `area + <sep> + project` (`AreaMembership.key`,
+`kFactKeySep` as the separator) and resolving `area`/`project` by name,
+never by id. A cross-device replace of an identical key changes nothing
+semantically – same area, same project, new local row id, membership
+intact.
+
+**Facts have no embeddings.** `Fact` deliberately carries no vector: exact
+access by (project, subject, attribute) is the whole point, so an ANN
+index would give poor neighbours for short EAV strings, cost an Ollama
+call per write, and either add a second vector path (forbidden – see the
+canonical-index rule above) or mix a second source kind into the one
+`MemoryIndex`. A `Fact` can instead point (`explainedBy`, `ToOne<MemoryEntry>`)
+at a `MemoryEntry` carrying the prose explanation, which `recall` can find.
+
+**The `area` filter resolves in three steps:** `AreaMembership` rows
+matching the area name are queried for their `project` property only (a
+property projection, not full entity hydration); those project names are
+then used as a case-sensitive `oneOf(...)` condition against
+`MemoryEntry.project` / `Fact.project`. No relation traversal is involved,
+consistent with membership being name-keyed rather than id-keyed.
+
+**`Fact.factKey` is intentionally not `@Unique`.** It is the deterministic
+`project + <sep> + subject + <sep> + attribute` string that groups a
+fact's history, but a `@Unique(replace)` index on it would mean a
+Sync-mandated replace on every new value for the same key – which would
+delete the previous row instead of closing it, destroying history on the
+very first correction. The "at most one current row per key" invariant is
+therefore enforced by the write path (query-first inside one write
+transaction), not by the schema; concurrent cross-device `fact_set` calls
+on the same key can transiently produce two current rows, which the write
+path detects and repairs explicitly, never silently.
 
 ## Ranking
 
