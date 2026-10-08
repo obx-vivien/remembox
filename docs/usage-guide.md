@@ -34,7 +34,7 @@ There is one rule across all three layers:
 |---|---|---|---|
 | **Now** | Current operational state: what is active, open, blocked or next | A small local `cockpit.md` | Active work projects, a move, an insurance claim, an upcoming appointment, deadlines and TODOs |
 | **Memory** | What the assistant should know and remember over time: current facts, what happened, what was decided and why | RememBox | Addresses, bank details, family context, health context, goals, preferences, decisions, previous attempts, research conclusions |
-| **Rules** | How the assistant should behave and maintain the system | `CLAUDE.md` in Claude Code; the Instructions for Claude field in Desktop, Cowork, web and mobile; a Skill for the long form | Recall before answering, keep memory current, maintain the cockpit, store conclusions rather than transcripts, supersede outdated facts |
+| **Rules** | How the assistant should behave and maintain the system | `CLAUDE.md` in Claude Code; the Instructions for Claude field in Desktop, Cowork, web and mobile; a Skill as the detailed tool guide | Recall before answering, keep memory current, maintain the cockpit, store conclusions rather than transcripts, supersede outdated facts |
 
 ### 1. The cockpit: what matters right now
 
@@ -118,7 +118,7 @@ The same memory practice is installed differently depending on where you use Cla
 
 - **Claude Code:** put the standing memory rules in a global `CLAUDE.md`, which is read at the start of every session.
 - **Claude Desktop, Cowork, claude.ai web and mobile:** put a short version of the rules into the Instructions for Claude field (claude.ai → Settings → Account), which those surfaces apply to all conversations, so it is loaded at the start of every chat. They do not read your Claude Code `CLAUDE.md`.
-- **The supplied RememBox Skill:** `skill/SKILL.md` in the repo (and in the release ZIP) holds the long form – the recall-first / remember-after loop plus the areas/facts/tags rules. A skill is loaded only when its description matches the topic, so it adds detail but does not guarantee the rules are present – see §6 for the three layers and how to install each.
+- **The supplied RememBox Skill:** `skill/SKILL.md` in the repo (and in the release ZIP) holds the detailed tool guide – the recall-first / remember-after loop plus the areas/facts/tags rules. A skill is loaded only when its description matches the topic, so it adds detail but does not guarantee the rules are present – see §6 for the three layers and how to install each.
 
 The rules teach the assistant to use memory as part of normal work.
 
@@ -162,7 +162,7 @@ It is an assistant that can maintain **continuity**:
 
 **what is happening now + what it already knows + how it should work with you.**
 
-The sections below contain the concrete setup: the global `CLAUDE.md` snippet, the three places the rules can live (§6), and the session-end routine.
+The sections below contain the concrete setup: the global `CLAUDE.md` rules (shipped as `templates/global-CLAUDE.md`), the three places the rules can live (§6), and the session-end routine.
 
 ### Where should something go?
 
@@ -172,7 +172,7 @@ A practical rule of thumb:
 |---|---|
 | **"What is happening now / what do I need to do next?"** | `cockpit.md` |
 | **"What do we know / what happened / what did we decide / why?"** | RememBox |
-| **"How should the assistant behave or perform this workflow?"** | `CLAUDE.md` in Claude Code, the Instructions for Claude field in Desktop/Cowork/web/mobile, a Skill for the long form |
+| **"How should the assistant behave or perform this workflow?"** | `CLAUDE.md` in Claude Code, the Instructions for Claude field in Desktop/Cowork/web/mobile, a Skill as the detailed tool guide |
 
 The conflict rule is straightforward:
 
@@ -252,88 +252,231 @@ than five on a single entry is kept but warned about – the tool result's
 `warning` always says what changed, never silently.
 
 **Check `tags_list` before inventing a new tag.** It reports every tag with
-its live-entry usage count, plus `variantGroups` (existing tags that look
-like spelling variants of each other) and `unused` (tags with zero live
+its live-entry usage count and whether it is `registered` (with its
+`description`), plus `variantGroups` (existing tags that look like
+spelling variants of each other) and `unused` (tags with zero live
 entries) – reuse what already exists instead of adding a near-duplicate.
+
+**Register a genuinely new tag with `tag_define`** – a name and one
+sentence on what the tag marks, e.g. `tag_define(name: "lesson",
+description: "Something we learned the hard way.")`. The name is
+normalized like any tag (`apps-script` registers `appsScript`). A name
+that repeats a project (active or archived – a project merged away with
+`project_merge` no longer counts), a kind or an area is rejected, and so
+is one that differs from a registered tag only by case, plural or
+separators (`lessons` next to `lesson`) unless you pass
+`allowSimilar: true`. In the
+default open mode registering is optional, but it documents the
+vocabulary; in strict mode (below) only registered tags can be used.
+
+**Record old spellings and synonyms as aliases.** `tag_define` takes
+`aliases` – alternative names that should mean the same tag, e.g.
+`tag_define(name: "housework", aliases: ["chores"])` or
+`tag_define(name: "cooking", aliases: ["recipe", "kitchen"])`. A write
+that uses an alias stores the tag instead, in both modes, and the
+result's `warning` says so (`Tag "chores" is an alias of "housework" –
+stored as "housework".`). `aliases` REPLACES the tag's aliases (an empty
+list clears them, including the ones `tag_merge` recorded); to change
+single ones use `addAliases`/`removeAliases` instead, and leave all three
+out to keep them. Every removed alias is named in the result's
+`warning`. An alias must not be another registered tag, an alias of
+another tag, or a project, area or kind name, and – unless you pass
+`allowSimilar: true` – not a spelling variant of another tag or alias. If
+the alias is still a tag in use, `tag_define` reminds you that
+`tag_merge` moves those entries. `tags_list` shows each tag's `aliases`,
+marks an alias in use with `aliasOf`, finds a tag by one of its aliases
+via `prefix` (`matchedAlias`), and flags an alias whose tag is not
+registered with `aliasTargetMissing` – such an alias is not resolved.
 
 **Clean up drift once in a while** with `tag_merge` (fold spelling variants
 into one tag) or `tag_remove` (delete tags that never should have existed).
 Both take `dryRun: true` – run that first to see the counts before writing.
+When the `tag_merge` target is a registered tag, the merged-away names
+become its aliases (and aliases of a merged-away tag move along), so a
+later write that still uses an old name lands on the target; the result
+lists them under `aliasesAdded`. A target that is itself an alias means
+its tag (the result says so). Merging into an unregistered target records
+no aliases – the result warns, so register the target first.
+`tag_remove` removes a tag's aliases together with its registration; to
+drop a single alias use `tag_define` with `removeAliases`.
 
 **Upgrading from a version older than 0.3.0?** Run `tags_normalize` once –
 it folds every pre-existing tag spelling into today's camelCase form
 (`dryRun: true` first, same as the other two).
 
-## 3. Global `CLAUDE.md` snippet
+The maintenance tools keep registrations consistent: `tag_merge` carries
+the description of a registered `from` tag over to an unregistered target
+and removes the `from` registrations (the result says what happened in
+`intoDefinition` and `definitionsRemoved`), and `tag_remove` removes the
+registration together with the tag.
+
+### Strict registry mode
+
+By default (open mode) the register is advisory: a new project name is
+registered on first write (logged), a new tag is simply created; nothing
+is rejected, warnings only for near-duplicates and merged project names.
+That is what lets a session invent `acme_app` next to `acme-app`. With
+`OBX_MEMORY_REGISTRY_MODE=strict` the server enforces the register
+instead:
+
+- `remember`, `supersede`, `fact_set` and `entries_move` reject a project
+  that has no registry row, or that was merged into another one
+  (`project_merge`). Archived projects stay writable. The error names
+  registered projects with a similar spelling and the `project_set` call
+  that would register the name.
+- `remember` and `supersede` reject any tag without a `tag_define`
+  registration, naming up to three similar registered tags for each (a
+  tag that repeats another project's, an area's or a kind's name cannot
+  be registered at all – the error says to drop it). Tags that are blank,
+  contain control characters or repeat the entry's own project, kind or
+  areas are still only dropped with a warning.
+- `project_set` needs a one-sentence description to create a project, and
+  rejects a name that differs from a registered one only by case, spaces,
+  `-` or `_` unless `allowSimilar: true` is passed. Updating an existing
+  project needs neither.
+- `project_merge` needs a registered `into`; `tag_merge` needs a target
+  that is registered or receives a definition from one of the merged tags.
+- A tag alias counts as registered: the write stores the tag it belongs
+  to. Projects have no separate alias field – a merged project name
+  already acts as one: the rejection names the project it was merged
+  into (following the merge chain to the current one).
+
+Nothing is written when a call is rejected, and the server logs one
+`[registry] strict: rejected …` line per rejection. `areas_list`
+(`projects`, `mergedProjects`) and `tags_list` (`registered`,
+`description`) are the register to look names up in; `stats` reports the
+active mode under `registry.mode`.
+
+**Switching an existing store to strict mode:**
+
+1. Run `reindex` once – it registers every project name already used on
+   entries and facts that has no registry row yet (without the
+   near-duplicate check; its result lists names that differ from another
+   one only by case/space/-/_ under `warning`).
+2. Merge spelling variants of the same project first: `project_merge`
+   (`dryRun: true` first). `areas_list` lists every project under
+   `projects`.
+3. Give each remaining project a one-sentence `description` with
+   `project_set` – recommended, not required: `reindex` already created
+   the rows strict mode needs.
+4. Run `tags_normalize` (`dryRun: true` first) so every tag is in
+   camelCase.
+5. Run `tags_list` with `limit: 500` (the default shows 100); if it says
+   `truncated: true`, go through it in slices with `prefix`. Then, in this
+   order:
+   1. `tag_define` every tag you keep AND every merge target – including
+      targets that do not exist as a tag yet. Leave the synonyms you are
+      about to merge undefined.
+   2. `tag_merge` each synonym group into its target – `dryRun: true`
+      first, and check `aliasesAdded`: the merged-away names become
+      aliases, so later writes that still use them land on the target.
+      (Merging into an unregistered target records no aliases and
+      warns.) Synonyms that never were a tag go in with `tag_define`'s
+      `addAliases`.
+   3. `tag_remove` the tags you drop. A tag that repeats a project, area
+      or kind name cannot be registered – `tag_merge` it into a real tag
+      or remove it.
+   4. `tags_list` with `limit: 500` again: expect `unregisteredInUse: 0`
+      (tags strict mode would reject) and `aliasesInUse: 0` (alias names
+      entries still carry – they resolve on write, but `tag_merge` them
+      into their tag to clean up).
+6. Set `OBX_MEMORY_REGISTRY_MODE=strict` in **every** client
+   registration and in the daemon, then restart all of them. The mode is
+   per process: a client still in open mode keeps registering new names.
+   With Sync, use the same mode on every device.
+   - Claude Code: if RememBox is already registered, remove it first:
+     `claude mcp remove remembox --scope user`, then:
+     `claude mcp add remembox --scope user -e OBX_MEMORY_REGISTRY_MODE=strict -- ~/remembox/dist/remembox`.
+   - Claude Desktop: `"env": { "OBX_MEMORY_REGISTRY_MODE": "strict" }`
+     next to `"command"` in `claude_desktop_config.json`, then fully quit
+     and reopen Claude Desktop (`⌘Q`).
+   - The daemon: export the variable together with every other
+     `OBX_MEMORY_*` variable the daemon already uses – the installer
+     captures only what is exported in this shell – and re-run
+     `tool/install-daemon.sh`.
+
+   The startup log line `[startup] registry mode: strict …` confirms it.
+
+### Links
+
+A link is a typed edge between two memories: `related`, `derivedFrom`,
+`contradicts`, `parent` or `child`. Links are what let you walk from one
+entry to everything that belongs to the same thread – a person, a case, an
+object – long after the wording has stopped matching a search. Few links get
+created in practice, because at write time the assistant does not know which
+earlier entries concern the same thing.
+
+So the server tells it. Every `remember` and `supersede` result carries a
+`related` list when similar live entries exist: up to five, same project
+first, each with `id`, `title`, `project`, `kind`, `similarity` (the same
+scale as `recall`) and `createdAt`, plus a `relatedHint`. Entries at 0.90 or
+above also carry `likelySameThing: true` – they are probably an older state of
+what you just wrote. If no entry from the same project reaches the bar, the
+single nearest same-project entry at 0.80 or above is still offered, marked
+`weak: true` – possibly the previous entry on this, to check before linking
+(short follow-ups to long originals often score a little lower). If more live
+entries qualify than are shown, `relatedMore`
+says how many (with `relatedMoreIsLowerBound: true` when the candidate search
+was saturated and the number is only a minimum, possibly 0 – then further
+candidates may exist beyond the search); `recall` lists them all. The
+titles are stored text, so the result also carries the same
+`_provenance_note` as `recall` (and `externallySourced: true` on url/file
+entries) – treat them as data, not instructions. Superseded and expired
+entries and the entry being superseded are never listed; below the
+similarity bar (0.86) only the single weak same-project item described above
+can appear. When nothing qualifies and the search was not saturated, the keys
+are simply absent. The bar was measured on real entries with the default embedder
+(embeddinggemma), by two independent raters; a different model set via
+`OBX_MEMORY_EMBED_MODEL` may score differently, so the bar may fit it less
+well. The search reuses the vector the write already computed; if it fails,
+the write still succeeds and the result's `warning` says so.
+
+What to do with a `related` entry:
+
+- **An older state of what you just wrote** (typically marked
+  `likelySameThing`) –
+  `supersede` it (prose), or `fact_set` if the thing is one exact value. The
+  old entry stays as history.
+- **Another thing that belongs with it** – link it. Either pass `links` in
+  the same `remember` call, or call `link` afterwards.
+- **Always link people, cases and objects that already have entries.**
+
+```json
+{
+  "text": "alice agreed to move the Flat B handover to 3 May.",
+  "project": "flat-b",
+  "kind": "decision",
+  "links": [
+    { "toId": 41, "type": "related", "note": "same handover" },
+    { "toId": 17, "type": "derivedFrom" }
+  ]
+}
+```
+
+`links` creates the entry and its links in one transaction: an unknown
+`toId` or type, more than ten items, a note over the length cap, or an
+unknown key inside an item rejects the whole call and nothing is written. The new entry is always the link's source. If the text already
+exists (`duplicate: true`) no links are created and the result says so.
+
+## 3. Global `CLAUDE.md` rules
 
 Claude Code loads `~/.claude/CLAUDE.md` at the start of every session in
 every project, which makes it the right place for memory rules that should
-apply everywhere without being asked for. This is a generalized version of
-what the author actually runs:
+apply everywhere without being asked for. The long form of those rules
+ships as **`templates/global-CLAUDE.md`** (in the repo and in the release
+ZIP) – copy it to `~/.claude/CLAUDE.md`, put the short block from §6 at
+the top, and replace the example project and area names with your own.
+In short, it covers:
 
-```markdown
-## Persistent memory (MCP server `remembox`)
-
-Use RememBox proactively as long-term memory across sessions and projects:
-
-- **Recall first:** at the start of any non-trivial task, call `recall`
-  with the topic/project (optionally with a `project` filter). Also
-  mid-task, whenever an earlier decision might be relevant ("have we
-  already decided this?").
-- **Store unasked** with `remember` – don't ask permission first:
-  - **decisions** made, with the reasoning (`kind: decision`)
-  - the operator's **preferences / working rules** (`kind: preference`)
-  - important **facts** about projects, systems, people (`kind: fact`)
-  - **incidents** with a lesson learned (`kind: episode`)
-- **Always fill provenance:** `sourceType` (chat/file/url/note),
-  `sourceRef` (session context, file path, or URL), `project`, `tags`.
-- **Set `project` deterministically:** always the git top-level directory
-  name inside a repo (e.g. `my-app`, `home-renovation`); outside a repo,
-  the name of the working topic. Never free text, never an abbreviation –
-  otherwise the filter fragments.
-- **Anti-loop discipline (long-running projects):** dead ends matter more
-  than successes. When an approach fails or is abandoned, store it as
-  `kind: episode` ("approach X abandoned because Y" + tag `dead-end`).
-  Before starting a new attempt at a known problem: `recall` with the
-  `project` filter for prior attempts/dead ends first. Never re-investigate
-  something already stored as done or failed without citing the old entry.
-- **Corrections via `supersede`**, never delete – the old memory stays
-  linked as history. `forget` only on explicit request (hard-delete only
-  when explicitly asked for).
-- **Link related memories** with `link`
-  (parent/child/related/contradicts/derivedFrom) when entries build on or
-  contradict each other.
-- Do not store: trivia, purely session-local state, secrets/credentials.
-- **`recall` filters ONLY by `project`** (plus optional `kind`/`sourceType`)
-  – **tags are not a filter.** An empty `project` is doubly harmful: the
-  entry shows up on unrelated queries AND is invisible to a scoped search.
-  Outside a repo, use a topic name (`side-business`, `taxes-2026`,
-  `personal`) – never leave it empty.
-- **Tags are cross-project labels, not a second `project`/`kind`:** check
-  `tags_list` before inventing one, and let the server's camelCase
-  normalization and redundancy warnings guide you. The server never fails
-  the write over tag content – control characters and a tag that exactly
-  duplicates the project name, a memory kind or an area are dropped, and a
-  near-duplicate, identifier/version, or more-than-five-tags case is kept
-  but warned about – the tool result's `warning` always says which
-  happened.
-- **`kind` is strictly validated:** only `fact`, `decision`, `preference`,
-  `episode`, `reference` – anything else throws a validation error. A
-  status snapshot is `kind: fact` + tag `status`, not a `kind` of its own.
-- **Use `fact_set`, not `remember`, for a single exact value that changes
-  over time and must be looked up exactly** (a rent, a renewal date, an
-  identifier) – keyed by project + subject + attribute, with automatic
-  history. `remember`'s `kind: fact` stays for prose knowledge instead.
-- **When creating a new project**, also call `project_set` to assign it to
-  its area(s) (`area_set` first if the area does not exist yet) – this is
-  what makes area filtering on `recall`/`list_recent`/`fact_query` useful
-  from the start instead of after the fact.
-```
-
-That block is deliberately copy-pasteable as-is into `~/.claude/CLAUDE.md`.
-The only thing to adapt is the project-name examples. It is the long form;
-§6 has the short block that belongs in your claude.ai Instructions for Claude field
-and, in addition, at the top of your `~/.claude/CLAUDE.md`.
+- **Continuity:** read the cockpit first; after a notable result,
+  overwrite the cockpit line and add a dated `status` fact to RememBox.
+- **Recall first, store without asking** (decisions, preferences, facts,
+  episodes – dead ends tagged `deadEnd`), always with provenance, never
+  secrets.
+- **Projects:** the repository directory name for coding work, a fixed
+  list grouped into areas otherwise; the register rule (look up, register
+  with `project_set`/`tag_define`, then use), tags, mandatory linking,
+  `fact_set` vs `remember`, and maintenance tools only on request.
 
 ## 4. Why `project` is mandatory
 
@@ -346,7 +489,7 @@ have found it, while still surfacing as noise on every *other* search. A
 prompt-level instruction to "always set project" is not enough – models
 skip steps under load, and a rule that only lives in a prompt has no
 backstop. Making the server refuse the call is what actually holds; the
-`CLAUDE.md` snippet above is guidance for the common case, the server
+global `CLAUDE.md` rules (§3) are guidance for the common case, the server
 validation is what prevents the failure mode when the guidance is ignored
 or a session runs without that `CLAUDE.md` loaded at all (see §6).
 
@@ -392,17 +535,21 @@ follow the rules.
 
 **Recommended setup:** put the short block below into BOTH always-loaded
 places – the Instructions for Claude field (for Desktop, Cowork, web and mobile) and
-`~/.claude/CLAUDE.md` (for Claude Code) – and keep the long-form rules in
-the skill, plus the fuller `CLAUDE.md` snippet from §3 if you use Claude
-Code.
+`~/.claude/CLAUDE.md` (for Claude Code) – install the skill as the
+detailed tool guide, and add the long form from
+`templates/global-CLAUDE.md` (§3) to `~/.claude/CLAUDE.md` if you use
+Claude Code.
 
 ```text
-Memory (RememBox): Before any non-trivial task, call recall first; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Before using a new project name, call areas_list and pick an existing one. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry, check tags_list first; never use a project name, an area name or an identifier as a tag. Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember). Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
 ```
 
 - **Replace the project list** with your own stable set of names. Fixing
   the list is the point: it is what stops two sessions from storing the
-  same topic under two spellings.
+  same topic under two spellings. (Strict registry mode, §2, makes the
+  server enforce it.)
+- **The cockpit sentence** refers to the `cockpit.md` from §1 – drop it if
+  you don't keep one.
 - **Keep it short.** The block is loaded into every chat; every line costs
   context everywhere, also in conversations that have nothing to do with
   memory. Details belong in the skill, not here.
@@ -414,7 +561,16 @@ Memory (RememBox): Before any non-trivial task, call recall first; store results
   not contain addresses, account numbers or similar – those belong in
   RememBox (§1).
 
-RememBox ships the long form as a skill at `skill/SKILL.md` – in the repo
+**Templates.** The whole setup ships ready to copy in `templates/` (in the
+repo and in the release ZIP): `instructions-for-claude.md` (this block,
+for the Instructions for Claude field – Desktop, Cowork, web, mobile), `global-CLAUDE.md` (for `~/.claude/CLAUDE.md` –
+Claude Code only: the block at the top, the long-form rules below it; §3
+summarizes them) and `cockpit.md` (a fictional example cockpit for §1 – copy it wherever you keep your files and replace
+`cockpit.md` in the block's first sentence with its full path; clients
+with local file access, Claude Code and Cowork, read it, the web and
+mobile apps cannot).
+
+RememBox ships the detailed tool guide as a skill at `skill/SKILL.md` – in the repo
 and in the release ZIP – covering the core loop plus the areas, facts and
 tags rules from §2 above. Install it for the surfaces you use:
 
@@ -475,7 +631,7 @@ A session working on a small project, `my-app`, start to finish:
    `recall("my-app search", project: "my-app")`. It returns: a `decision`
    from three weeks ago – "chose SQLite FTS5 over a separate search
    service because the dataset is small and an extra service isn't worth
-   the ops cost" – and an `episode` tagged `dead-end`: "tried a naive
+   the ops cost" – and an `episode` tagged `deadEnd`: "tried a naive
    `LIKE '%term%'` query first, too slow past 10k rows, abandoned."
 2. **Use it.** Both inform the plan: build on FTS5, don't retry the `LIKE`
    approach.

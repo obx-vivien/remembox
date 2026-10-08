@@ -13,12 +13,13 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
+import 'package:meta/meta.dart' show visibleForTesting;
 
 import '../objectbox.g.dart';
 import 'embedder.dart';
 import 'instance_guard.dart';
 import 'model.dart';
-import 'store.dart' show LogSink, StoreMode, stderrLog;
+import 'store.dart' show LogSink, RegistryMode, StoreMode, stderrLog;
 import 'store.dart' as store_lib show sanitizeForLog, truncateForError;
 import 'store_gate.dart';
 
@@ -32,6 +33,7 @@ part 'memory_service_registry.dart';
 part 'memory_service_areas.dart';
 part 'memory_service_facts.dart';
 part 'memory_service_tags.dart';
+part 'memory_service_related.dart';
 
 /// Invalid tool input (unknown kind, missing entry, ...). The MCP adapter
 /// maps this to an isError tool result with the message verbatim.
@@ -100,6 +102,13 @@ class MemoryService {
   /// design).
   final StoreInstanceGuard? guard;
 
+  /// `OBX_MEMORY_REGISTRY_MODE` (see [RegistryMode]): in
+  /// [RegistryMode.strict], writes that name an unregistered (or merged)
+  /// project or an unregistered tag are rejected inside their write
+  /// transaction, before anything is written. [RegistryMode.open] (the
+  /// default) keeps every write path exactly as it was.
+  final RegistryMode registryMode;
+
   /// The [StoreSession] currently lent by [gate], set/cleared exclusively by
   /// [_withSession] for the duration of one [gate.withStore] callback. Every
   /// store/box getter below reads this via [_requireSession] — see that
@@ -134,6 +143,11 @@ class MemoryService {
   Box<AreaMembership> get _memberships =>
       _requireSession('_memberships').memberships;
   Box<Fact> get _facts => _requireSession('_facts').facts;
+  // Strict registry mode: registered tag vocabulary.
+  Box<TagDefinition> get _tagDefs =>
+      _requireSession('_tagDefs').tagDefinitions;
+  Box<TagAlias> get _tagAliases =>
+      _requireSession('_tagAliases').tagAliases;
 
   /// Runs [body] inside exactly one [gate.withStore] lending, setting
   /// [_currentSession] for its duration so the getters above resolve. This
@@ -182,6 +196,127 @@ class MemoryService {
   static const int overfetchMin = 20;
   static const int overfetchMax = 256;
 
+  /// Minimum similarity (`1 - cosineDistance / 2`, the scale [recall]
+  /// reports) for a candidate to be offered as `related` by [remember].
+  ///
+  /// Calibrated 2026-10-03 on REAL entries (long, often German, many written
+  /// from similar templates) with the default embedder (embeddinggemma):
+  /// two independent raters labelled 67 pairs sampled in similarity bands
+  /// (useful vs. noise agreement 61/67, Cohen's kappa 0.81). Share of pairs
+  /// judged useful: 21–29 % at 0.78–0.80, 43–57 % at 0.80–0.83, 43–64 % at
+  /// 0.83–0.86, but 25/25 at 0.86 and above (11/11 at 0.90 and above). At
+  /// 0.78 the median real entry had 8 neighbours and 76 % had more than the
+  /// cap, i.e. mostly noise. This replaces the earlier bar (0.78), which was
+  /// calibrated on short synthetic English texts and does not transfer.
+  /// Model-specific: re-measure when the default embedder changes.
+  static const double relatedMinSimilarity = 0.86;
+
+  /// From this similarity on, a `related` item is flagged
+  /// `likelySameThing: true`: in the same rated sample every "older state of
+  /// the same thing" lay at 0.86 or above, most at 0.90 or above, and
+  /// 64–82 % of the pairs at 0.90 and above were judged the same thing.
+  /// Same embedder caveat as [relatedMinSimilarity].
+  static const double relatedLikelySameSimilarity = 0.90;
+
+  /// Weak tier: when NO same-project candidate reaches
+  /// [relatedMinSimilarity], the single nearest live same-project candidate
+  /// at or above this similarity is still offered, marked `weak: true`
+  /// (never `likelySameThing`). Basis: an end-to-end check on a copy of a
+  /// real store (12 realistic follow-up notes to existing entries, 4
+  /// unrelated controls) showed the shown suggestions were 7/7 useful and
+  /// the controls got none (nearest neighbour at most 0.68), but the obvious
+  /// predecessor was suggested in only 6/12 cases – in 10/12 it WAS the
+  /// nearest live neighbour, yet at 0.80–0.86, because short follow-ups to
+  /// long originals score lower. As arbitrary pairs that band is only
+  /// 43–64 % useful, which is why the tier is restricted to the one nearest
+  /// same-project neighbour and labelled weak. It counts toward
+  /// [relatedMax] and not toward `relatedMore`. Same embedder caveat as
+  /// [relatedMinSimilarity].
+  static const double relatedWeakMinSimilarity = 0.80;
+
+  /// At most this many `related` entries are returned per write; the number
+  /// of further candidates above the bar is reported as `relatedMore`, never
+  /// dropped silently.
+  static const int relatedMax = 5;
+
+  /// ANN candidates fetched for the related search: a small k, but larger
+  /// than [relatedMax] because the new entry itself is always among the
+  /// nearest and superseded/expired/other-model rows are dropped afterwards
+  /// (long supersede chains would otherwise fill the slots with old
+  /// versions) – hence the same floor recall over-fetches with.
+  static const int relatedFetchK = overfetchMin;
+
+  /// Max entries in `remember`'s `links` argument; more are rejected (the
+  /// rest can be created with the `link` tool).
+  static const int maxLinksPerRemember = 10;
+
+  /// Hint returned next to `related`: items marked `likelySameThing` are
+  /// probably an older state of what was just written, the others are link
+  /// candidates. [more] and [moreIsLowerBound] (see [RelatedSuggestions])
+  /// append the note about candidates not shown. With no [hasItems] and a
+  /// saturated search, only the note about possibly missing candidates is
+  /// returned.
+  static String relatedHintFor({
+    required bool hasItems,
+    bool hasWeak = false,
+    required int more,
+    required bool moreIsLowerBound,
+  }) {
+    final b = StringBuffer();
+    if (hasItems) {
+      b.write(
+        'Possibly about the same thing. Items with likelySameThing: true '
+        'are probably an older state of what you just wrote – use '
+        '`supersede` for prose or `fact_set` for an exact value (the old '
+        'entry stays as history). For the others consider `link` (related, '
+        'derivedFrom, contradicts, parent/child).',
+      );
+    }
+    if (hasWeak) {
+      b.write(
+        ' Items marked weak: true are possibly the previous entry on this – '
+        'check before linking.',
+      );
+    }
+    if (more == 0 && moreIsLowerBound) {
+      b.write(
+        '${hasItems ? ' ' : ''}Further candidates above the bar may exist '
+        'beyond the candidate search (it was saturated); `recall` lists '
+        'them.',
+      );
+    } else if (more > 0) {
+      b.write(
+        moreIsLowerBound
+            ? ' At least $more further candidate(s) above the bar were not '
+                  'shown (lower bound: the candidate search was saturated); '
+                  '`recall` lists them all.'
+            : ' $more further candidate(s) above the bar were not shown; '
+                  '`recall` lists them all.',
+      );
+    }
+    return b.toString();
+  }
+
+  /// Similarity as [recall] reports it, from an ANN cosine distance
+  /// (0.0..2.0, lower is closer). The one definition both searches use.
+  static double similarityOfDistance(double distance) => 1.0 - distance / 2.0;
+
+  /// The ANN query over the vector index, shared by [recall] and the
+  /// related search so both rank with the same HNSW call. MUST run inside
+  /// a StoreGate lending.
+  List<ObjectWithScore<MemoryIndex>> _annSearch(
+    List<double> vector,
+    int maxResults,
+  ) => _useQuery(
+    _index.query(MemoryIndex_.embedding.nearestNeighborsF32(vector, maxResults)),
+    (q) => q.findWithScores(),
+  );
+
+  /// Test seam: invoked at the start of the related search (inside its
+  /// lending) so a test can make it fail. Always null in production.
+  @visibleForTesting
+  void Function()? debugBeforeRelatedSearch;
+
   MemoryService({
     required this.gate,
     required this.embedder,
@@ -190,6 +325,7 @@ class MemoryService {
     this.log = stderrLog,
     this.maxTextChars = 32000,
     this.guard,
+    this.registryMode = RegistryMode.open,
   }) {
     if (embedder.dims != MemoryIndex.hnswDimensions) {
       // A mismatch here would silently ruin ANN quality — hard error naming
@@ -389,6 +525,10 @@ class MemoryService {
   static const int _languageMaxLen = 16;
   static const int _sourceRefMaxLen = 4096;
   static const int _tagMaxLen = 128;
+
+  /// Public alias of [_tagMaxLen] for server.dart's `tag_define` schema
+  /// text (same pattern as [areaNameMaxLen]).
+  static const int tagMaxLen = _tagMaxLen;
   static const int _tagMaxCount = 64;
   static const int _docFieldMaxLen = 4096;
   static const int _noteMaxLen = 4096;
@@ -724,6 +864,17 @@ class MemoryService {
     String? docMimeType,
     DateTime? docCreatedAt,
     String? docContentHash,
+    // Links from the new entry to existing ones, created in the SAME write
+    // transaction (all-or-nothing); see [LinkSpec].
+    List<LinkSpec> links = const [],
+    // Entry ids never offered as `related` (supersede passes the entry it
+    // replaces).
+    Set<int> excludeFromRelated = const {},
+    // Internal, set by supersede (strict registry mode): the tool name for
+    // a rejection's log line, and the old entry's id when `project` was
+    // inherited from it, so the rejection message can say so.
+    String registryTool = 'remember',
+    int? projectInheritedFrom,
   }) async {
     _requireKind(kind);
     _requireSourceType(sourceType);
@@ -742,6 +893,7 @@ class MemoryService {
       docMimeType: docMimeType,
       docContentHash: docContentHash,
     );
+    _requireLinkSpecs(links);
     final normalized = normalizeText(text);
     if (normalized.isEmpty) {
       throw ValidationException('Cannot remember empty text.');
@@ -795,8 +947,40 @@ class MemoryService {
     // the existing `txResult is MemoryEntry` / `as int` dedup-vs-insert
     // dispatch just below stays untouched.
     final registryWarnings = <String>[];
+    final createdLinks = <Map<String, Object?>>[];
     final Object txResult = await _withSession('remember-entry', () {
       return store.runInTransaction(TxMode.write, () {
+        // Link targets are checked before the dedup lookup so a bad
+        // `links` list is rejected the same way whether or not the text
+        // already exists; nothing has been written yet at this point.
+        for (final l in links) {
+          _requireEntry(l.toId, what: 'Link target');
+        }
+        // Strict registry mode: the project must be registered (and not
+        // merged) – checked in THIS write tx, before the dedup lookup and
+        // before anything is written, so a rejection also covers the
+        // duplicate path and leaves no trace. No-op in open mode.
+        _requireWritableProject(
+          validatedProject,
+          tool: registryTool,
+          inheritedFromEntryId: projectInheritedFrom,
+        );
+        // 2026-09-21, tag discipline (0.3.0): _prepareTags is the single
+        // enforcement point for the tag rules (normalize, drop redundant/
+        // duplicate, warn on near-duplicate/too-many/identifier-like) – run
+        // INSIDE this write tx (it queries _tags/_memberships) and BEFORE
+        // entry.tags is populated, so the entity only ever gets the
+        // prepared (not raw) tag list. See memory_service_tags.dart.
+        // Runs before the dedup lookup (strict registry mode: an
+        // unregistered tag rejects the call there too); it writes and logs
+        // nothing itself, so in open mode the earlier position changes no
+        // result – its warnings are still only reported on a new entry.
+        final prepared = _prepareTags(
+          tags,
+          project: validatedProject,
+          kind: kind,
+          tool: registryTool,
+        );
         final existing = _useQuery(
           _entries.query(MemoryEntry_.contentHash.equals(hash)),
           (q) => q.findFirst(),
@@ -815,15 +999,16 @@ class MemoryService {
             docCreatedAt: docCreatedAt,
           );
         }
-        // 2026-09-21, tag discipline (0.3.0): _prepareTags is the single
-        // enforcement point for the tag rules (normalize, drop redundant/
-        // duplicate, warn on near-duplicate/too-many/identifier-like) – run
-        // INSIDE this write tx (it queries _tags/_memberships) and BEFORE
-        // entry.tags is populated, so the entity only ever gets the
-        // prepared (not raw) tag list. See memory_service_tags.dart.
-        final prepared = _prepareTags(tags, project: validatedProject, kind: kind);
         entry.tags.addAll(prepared.tags.map(_getOrCreateTag));
         final id = _entries.put(entry);
+        // `links`: same write transaction as the entry, through the one
+        // link-creation helper `link` itself uses. Any failure aborts the
+        // whole transaction (entry included).
+        for (final l in links) {
+          createdLinks.add(
+            _createLinkInTx(id, l.toId, l.type, l.note),
+          );
+        }
         // 2026-09-21, areas and facts (0.3.0): register the project (or
         // note it is already registered) and surface a near-duplicate-name
         // warning, in this SAME write tx – F15 forbids a nested StoreGate
@@ -873,7 +1058,18 @@ class MemoryService {
         'duplicate': true,
         'contentHash': hash,
         'message': 'Identical text already stored as entry ${txResult.id}.',
+        if (links.isNotEmpty)
+          'warning':
+              'The ${links.length} requested link(s) were NOT created: the '
+              'text already exists as entry ${txResult.id}. Use the link '
+              'tool on that id if the links are still wanted.',
       };
+      if (links.isNotEmpty) {
+        log(
+          '[memory] duplicate remember() skipped ${links.length} requested '
+          'link(s) for existing entry ${txResult.id}',
+        );
+      }
       return _applyGuardPeerWarning(dedupResult);
     }
     final entryId = txResult as int;
@@ -907,15 +1103,45 @@ class MemoryService {
     // below, not a second one.
     final warnings = <String>[...registryWarnings];
     bool indexed = true;
+    List<double>? vector;
+    var related = const RelatedSuggestions.none();
     try {
       // Split embed (unlocked async I/O) from the index-row write (locked,
       // 2026-09-01 Store-Gate plan §4.1/§4.2): embedding must never sit
       // inside a StoreGate lending — see _embedForIndex/_upsertIndexRow.
-      final vector = await _embedForIndex(normalized);
-      await _withSession(
-        'remember-index',
-        () => _upsertIndexRow(entryId, normalized, hash, vector),
-      );
+      final embedded = await _embedForIndex(normalized);
+      vector = embedded;
+      await _withSession('remember-index', () {
+        _upsertIndexRow(entryId, normalized, hash, embedded);
+        // Related entries: one ANN query with the vector just indexed (no
+        // second embed), at the end of THIS lending so gated mode does not
+        // open the store an extra time per write. Never fails the write –
+        // a search failure is logged with context and surfaced as a
+        // warning.
+        try {
+          debugBeforeRelatedSearch?.call();
+          related = _findRelated(
+            entryId: entryId,
+            vector: embedded,
+            project: validatedProject,
+            excludeIds: excludeFromRelated,
+          );
+        } catch (err) {
+          // Deliberately broad: the entry is already durably stored and
+          // the related list is a convenience, so ANY failure here (store
+          // closed, native error) must not turn a successful write into
+          // an error. It is logged and reported, never swallowed.
+          final warning =
+              'Entry $entryId stored, but the related-entries search '
+              'failed (${_truncateForError(sanitizeForLog('$err'))}); no '
+              'related suggestions were computed.';
+          warnings.add(warning);
+          log(
+            '[memory] WARN: entry $entryId related search failed: '
+            '${sanitizeForLog('$err')}',
+          );
+        }
+      });
     } on EmbedderException catch (err) {
       indexed = false;
       final warning =
@@ -924,6 +1150,12 @@ class MemoryService {
           '(observer sweep or the reindex tool).';
       warnings.add(warning);
       log('[memory] WARN: $warning');
+    }
+    if (vector == null) {
+      log(
+        '[memory] related search skipped for entry $entryId: no vector '
+        '(embedding/indexing failed, see warning above)',
+      );
     }
 
     // FIX-7 (NIT, the 2026-07-06 engineering log (internal) review round 1,
@@ -954,6 +1186,15 @@ class MemoryService {
       'duplicate': false,
       'contentHash': hash,
       'indexed': indexed,
+      if (createdLinks.isNotEmpty) 'links': createdLinks,
+      if (related.items.isNotEmpty) '_provenance_note': _provenanceNote,
+      if (related.items.isNotEmpty) 'related': related.items,
+      if (related.hint != null) 'relatedHint': related.hint,
+      // relatedMore is 0 only together with the lower-bound flag: the
+      // saturated fetch may have hidden candidates the count cannot see.
+      if (related.more > 0 || related.moreIsLowerBound)
+        'relatedMore': related.more,
+      if (related.moreIsLowerBound) 'relatedMoreIsLowerBound': true,
       if (warnings.isNotEmpty) 'warning': warnings.join(' '),
     };
     return _applyGuardPeerWarning(result);
@@ -1103,6 +1344,9 @@ class MemoryService {
       tags: tags,
       language: language ?? oldDefaults.language,
       expiresAt: expiresAt,
+      excludeFromRelated: {oldId},
+      registryTool: 'supersede',
+      projectInheritedFrom: project == null ? oldId : null,
     );
     final newId = rememberResult['id'] as int;
     if (newId == oldId) {
@@ -1132,6 +1376,16 @@ class MemoryService {
       'oldId': oldId,
       'newId': newId,
       'newEntryWasDuplicate': rememberResult['duplicate'],
+      if (rememberResult['related'] != null) ...{
+        '_provenance_note': rememberResult['_provenance_note'],
+        'related': rememberResult['related'],
+      },
+      if (rememberResult['relatedHint'] != null)
+        'relatedHint': rememberResult['relatedHint'],
+      if (rememberResult['relatedMore'] != null)
+        'relatedMore': rememberResult['relatedMore'],
+      if (rememberResult['relatedMoreIsLowerBound'] != null)
+        'relatedMoreIsLowerBound': rememberResult['relatedMoreIsLowerBound'],
       if (rememberResult['warning'] != null)
         'warning': rememberResult['warning'],
     };
@@ -1299,10 +1553,7 @@ class MemoryService {
     // stops at the last read (the hydration/filtering loop) and returns
     // before either write block runs.
     final candidates = store.runInTransaction(TxMode.read, () {
-      final candidates = _useQuery(
-        _index.query(MemoryIndex_.embedding.nearestNeighborsF32(vector, fetchK)),
-        (q) => q.findWithScores(),
-      );
+      final candidates = _annSearch(vector, fetchK);
       for (final hit in candidates) {
         final row = hit.object;
         final entry = row.entryId == 0 ? null : _entries.get(row.entryId);
@@ -1340,7 +1591,7 @@ class MemoryService {
           continue;
         }
         final distance = hit.score; // cosine distance, 0.0..2.0, lower=closer
-        final similarity = 1.0 - distance / 2.0;
+        final similarity = similarityOfDistance(distance);
         final ageDays =
             now.difference(entry.createdAt).inSeconds / Duration.secondsPerDay;
         final recencyBoost =
@@ -1648,74 +1899,95 @@ class MemoryService {
     return _applyGuardPeerWarning(result);
   });
 
-  Future<Map<String, Object?>> link(
-    int fromId,
-    int toId,
-    String type, {
-    String note = '',
-  }) => _withSession('link', () {
+  /// Pure field validation shared by [link] and `remember`'s `links`
+  /// argument ([_requireLinkSpecs]): the link type and the note length.
+  void _requireLinkFields(String type, String note) {
     if (!LinkType.isValid(type)) {
       throw ValidationException(
         'Unknown link type "${_truncateForError(type)}". Valid types: '
         '${LinkType.all.join(', ')}.',
       );
     }
-    // M-4: the one caller-supplied string field link() has, outside of
-    // [_requireArgLengths] (remember()/supersede()'s helper — link() isn't
-    // one of those two, so this is its own call).
+    // M-4: the one caller-supplied string field a link has, outside of
+    // [_requireArgLengths] (remember()/supersede()'s helper).
     _requireLen('note', note, _noteMaxLen);
+  }
+
+  /// Creates the link [fromId] -([type])-> [toId], or returns the existing
+  /// identical one (`duplicate: true`). The ONE link-creation path: [link]
+  /// wraps it in its own write transaction, `remember`'s `links` calls it
+  /// inside the entry's. MUST run inside a write transaction (it does not
+  /// open one, so it can join an enclosing one) and validates the ids
+  /// itself; field validation ([_requireLinkFields]) is the caller's job.
+  ///
+  /// Query-or-create duplicate guard. A schema-level synthetic unique key
+  /// is deliberately NOT possible here: MemoryLink is @Sync()'d and object
+  /// ids are device-local, so an id-derived key would diverge across
+  /// devices (contract §4: use a stable strategy at sync boundaries – the
+  /// relations themselves are that strategy).
+  Map<String, Object?> _createLinkInTx(
+    int fromId,
+    int toId,
+    String type,
+    String note,
+  ) {
     if (fromId == toId) {
       throw ValidationException('Cannot link entry $fromId to itself.');
     }
     _requireEntry(fromId, what: 'Link source');
     _requireEntry(toId, what: 'Link target');
-    // Query-or-create duplicate guard. A schema-level synthetic unique key
-    // is deliberately NOT possible here: MemoryLink is @Sync()'d and object
-    // ids are device-local, so an id-derived key would diverge across
-    // devices (contract §4: use a stable strategy at sync boundaries — the
-    // relations themselves are that strategy).
-    //
+    final existing = _useQuery(
+      _links.query(
+        MemoryLink_.from
+            .equals(fromId)
+            .and(MemoryLink_.to.equals(toId))
+            .and(MemoryLink_.linkType.equals(type)),
+      ),
+      (q) => q.findFirst(),
+    );
+    if (existing != null) {
+      log(
+        '[memory] link $fromId -($type)-> $toId already exists as '
+        'link ${existing.id} – returning existing',
+      );
+      return {
+        'linkId': existing.id,
+        'duplicate': true,
+        'fromId': fromId,
+        'toId': toId,
+        'type': type,
+      };
+    }
+    final link = MemoryLink(linkType: type, note: note);
+    link.from.targetId = fromId;
+    link.to.targetId = toId;
+    final linkId = _links.put(link);
+    log('[memory] linked $fromId -($type)-> $toId (link $linkId)');
+    return {
+      'linkId': linkId,
+      'duplicate': false,
+      'fromId': fromId,
+      'toId': toId,
+      'type': type,
+      if (note.isNotEmpty) 'note': note,
+    };
+  }
+
+  Future<Map<String, Object?>> link(
+    int fromId,
+    int toId,
+    String type, {
+    String note = '',
+  }) => _withSession('link', () {
+    _requireLinkFields(type, note);
     // The guard.peersPresent() check + _appendGuardWarning is applied AFTER
     // the transaction below returns (not inside it): peersPresent() runs an
     // OS-level probe (pgrep/lock check), which has no business running while
     // a DB write transaction is open.
-    final result = store.runInTransaction(TxMode.write, () {
-      final existing = _useQuery(
-        _links.query(
-          MemoryLink_.from
-              .equals(fromId)
-              .and(MemoryLink_.to.equals(toId))
-              .and(MemoryLink_.linkType.equals(type)),
-        ),
-        (q) => q.findFirst(),
-      );
-      if (existing != null) {
-        log(
-          '[memory] link $fromId -($type)-> $toId already exists as '
-          'link ${existing.id} — returning existing',
-        );
-        return {
-          'linkId': existing.id,
-          'duplicate': true,
-          'fromId': fromId,
-          'toId': toId,
-          'type': type,
-        };
-      }
-      final link = MemoryLink(linkType: type, note: note);
-      link.from.targetId = fromId;
-      link.to.targetId = toId;
-      final linkId = _links.put(link);
-      log('[memory] linked $fromId -($type)-> $toId (link $linkId)');
-      return {
-        'linkId': linkId,
-        'duplicate': false,
-        'fromId': fromId,
-        'toId': toId,
-        'type': type,
-        if (note.isNotEmpty) 'note': note,
-      };
-    });
+    final result = store.runInTransaction(
+      TxMode.write,
+      () => _createLinkInTx(fromId, toId, type, note),
+    );
     return _applyGuardPeerWarning(result);
   });
 
@@ -1997,6 +2269,12 @@ class MemoryService {
         'blankProjectEntries': blankProjectEntries,
         'membershipsWithoutArea': membershipsWithoutArea,
         'membershipsWithoutProjectRows': membershipsWithoutProjectRows,
+        // Strict registry mode: which rule this process enforces, and how
+        // many tags are registered (TagDefinition rows).
+        'mode': registryMode.name,
+        'tagDefinitions': _tagDefs.count(),
+        // Alternative names of registered tags (TagAlias rows).
+        'tagAliases': _tagAliases.count(),
       };
 
       // "Current" per the addendum's definition: open-ended, not
@@ -2390,6 +2668,15 @@ class MemoryService {
       if (danglingLinkDetails.isNotEmpty)
         'danglingLinkDetails': danglingLinkDetails,
       'registry': registrySummary,
+      // The registry backfill's near-duplicate report (if any), surfaced
+      // at the top level so it is not buried in the nested block. Rebuilt
+      // from `nearDuplicates`, NOT copied from the backfill's `warning`:
+      // that string already carries the peer-guard warning, which
+      // _applyGuardPeerWarning below appends again.
+      if (registrySummary['nearDuplicates'] case final List nearDuplicates)
+        'warning': _nearDuplicateRegistryWarning(
+          nearDuplicates.cast<Map<String, Object?>>(),
+        ),
     };
     final changedOrFailed =
         created +

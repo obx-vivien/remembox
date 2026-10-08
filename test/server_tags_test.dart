@@ -8,7 +8,11 @@
 /// an `invalid_input` tool result; the underlying service logic has its own
 /// dedicated tests (test/tags_test.dart).
 ///
-/// Synthetic data only: project `home`, tags `alice`, `bob`.
+/// Also covers `tag_define` (2026-10-06, tag registry) and one strict
+/// registry mode rejection over the wire.
+///
+/// Synthetic data only: project `home`, tags `alice`, `bob`, `lesson`,
+/// `appsScript`.
 library;
 
 import 'dart:async';
@@ -19,6 +23,7 @@ import 'package:dart_mcp/client.dart';
 import 'package:remembox/src/memory_service.dart';
 import 'package:remembox/src/model.dart';
 import 'package:remembox/src/server.dart';
+import 'package:remembox/src/store.dart' show RegistryMode;
 import 'package:stream_channel/stream_channel.dart';
 import 'package:test/test.dart';
 
@@ -137,8 +142,10 @@ void main() {
 
       final r = await callOk('tags_list', {});
       final list = (r['tags']! as List).cast<Map<String, Object?>>();
+      // `registered`/`description` (tag registry, 2026-10-06) are part
+      // of every row; nothing is registered here.
       expect(list, [
-        {'name': 'alice', 'count': 2},
+        {'name': 'alice', 'count': 2, 'registered': false, 'description': null},
       ]);
       expect(r['_provenance_note'], isNotNull);
     });
@@ -308,5 +315,135 @@ void main() {
       expect(dry['dryRun'], true);
       expect(store.box<Tag>().getAll().map((t) => t.name).toList(), ['Alice']);
     });
+  });
+
+  group('tag_define', () {
+    test('is listed by tools/list with a closed schema', () async {
+      final listed = await connection.listTools();
+      final tool = listed.tools.singleWhere((t) => t.name == 'tag_define');
+      final schema = tool.inputSchema;
+      expect(schema.required, ['name']);
+      expect(
+        schema.properties!.keys,
+        unorderedEquals([
+          'name',
+          'description',
+          'allowSimilar',
+          'aliases',
+          'addAliases',
+          'removeAliases',
+        ]),
+      );
+      expect(schema.additionalProperties, isFalse);
+    });
+
+    test('registers a tag and reports it', () async {
+      final r = await callOk('tag_define', {
+        'name': 'apps-script',
+        'description': 'Automation scripts.',
+      });
+      expect(r['name'], 'appsScript');
+      expect(r['action'], 'created');
+      expect(r['normalizedFrom'], 'apps-script');
+    });
+
+    test('aliases are wired through; omitted leaves them, [] clears them',
+        () async {
+      final r = await callOk('tag_define', {
+        'name': 'cooking',
+        'description': 'Meals and how to make them.',
+        'aliases': ['recipe', 'kitchen'],
+      });
+      expect(r['aliases'], ['kitchen', 'recipe']);
+      final kept = await callOk('tag_define', {'name': 'cooking'});
+      expect(kept['aliases'], ['kitchen', 'recipe']);
+      final cleared = await callOk('tag_define', {
+        'name': 'cooking',
+        'aliases': <String>[],
+      });
+      expect(cleared['aliases'], isEmpty);
+      expect(cleared['aliasesRemoved'], ['kitchen', 'recipe']);
+    });
+
+    test('bad input surfaces as invalid_input', () async {
+      final r = await callInvalid('tag_define', {'name': 'lesson'});
+      expect(r['message'], contains('a description is required'));
+    });
+
+    test('an unknown argument is rejected, nothing registered', () async {
+      // The typed client sends the arguments as given; the server's schema
+      // validation (additionalProperties: false) rejects the call before
+      // the handler runs.
+      final result = await call('tag_define', {
+        'name': 'lesson',
+        'descripton': 'Misspelled key.',
+      });
+      expect(result.isError, isTrue);
+      final text = (result.content.single as TextContent).text;
+      expect(text, contains('"descripton"'));
+      expect(testGate.store.box<TagDefinition>().count(), 0);
+    });
+  });
+
+  test('strict registry mode: remember with an unregistered tag is an '
+      'invalid_input error naming the tag', () async {
+    final strictService = MemoryService(
+      gate: testGate.gate,
+      embedder: embedder,
+      registryMode: RegistryMode.strict,
+    );
+    final clientToServer = StreamController<String>();
+    final serverToClient = StreamController<String>();
+    final strictServer = RememboxServer(
+      StreamChannel<String>.withCloseGuarantee(
+        clientToServer.stream,
+        serverToClient.sink,
+      ),
+      service: strictService,
+    );
+    final strictClient = _TestClient();
+    final strictConnection = strictClient.connectServer(
+      StreamChannel<String>.withCloseGuarantee(
+        serverToClient.stream,
+        clientToServer.sink,
+      ),
+    );
+    addTearDown(() async {
+      await strictClient.shutdown();
+      await strictServer.shutdown();
+      await strictService.dispose();
+    });
+    await strictConnection.initialize(
+      InitializeRequest(
+        protocolVersion: ProtocolVersion.latestSupported,
+        capabilities: strictClient.capabilities,
+        clientInfo: strictClient.implementation,
+      ),
+    );
+    strictConnection.notifyInitialized(InitializedNotification());
+    await strictServer.initialized;
+
+    await strictService.projectSet(
+      name: 'home',
+      description: 'Synthetic household project.',
+    );
+    final result = await strictConnection.callTool(
+      CallToolRequest(
+        name: 'remember',
+        arguments: {
+          'text': 'strict probe',
+          'project': 'home',
+          'tags': ['lesson'],
+        },
+      ),
+    );
+    expect(result.isError, isTrue);
+    final json = _decodeToolJson(result);
+    expect(json['error'], 'invalid_input');
+    expect(
+      json['message'],
+      contains('tag(s) not registered (strict registry mode): "lesson"'),
+    );
+    expect(testGate.store.box<MemoryEntry>().count(), 0);
   });
 }

@@ -17,6 +17,7 @@ import 'dart:io';
 import 'package:remembox/objectbox.g.dart';
 import 'package:remembox/src/instance_guard.dart';
 import 'package:remembox/src/memory_service.dart';
+import 'package:remembox/src/model.dart';
 import 'package:remembox/src/store.dart'
     show StoreMode, localActivationSyncUrl;
 import 'package:remembox/src/store_gate.dart';
@@ -497,4 +498,61 @@ void main() {
       );
     },
   );
+
+  test('reindex carries the guard-peer warning exactly once, also next to '
+      'the registry near-duplicate report', () async {
+    final store = openStore(directory: tempDir.path);
+    final syncClient = SyncClient(
+      store,
+      [localActivationSyncUrl],
+      [SyncCredentials.none()],
+    )..start();
+    final guard = StoreInstanceGuard.acquire(
+      tempDir.path,
+      log: logCapture,
+      exclusive: false,
+    );
+    final gate = await StoreGate.persistent(
+      store: store,
+      syncClient: syncClient,
+      storeDirectory: tempDir.path,
+      log: logCapture,
+    );
+    final service = MemoryService(
+      gate: gate,
+      embedder: FakeEmbedder(),
+      log: logCapture,
+      guard: guard,
+    );
+    addTearDown(() async {
+      await service.dispose();
+      await gate.close();
+      guard.release(log: logCapture);
+    });
+
+    final peer = await _Peer.spawn(
+      tempDir.path,
+      'test/helpers/hold_shared_lock.dart',
+    );
+    addTearDown(peer.stop);
+
+    int peerWarnings(Object? warning) =>
+        RegExp('Another RememBox process').allMatches('$warning').length;
+
+    // Without near-duplicates: main's shape – one peer warning.
+    await service.remember(text: 'first', project: 'acme-app');
+    final plain = await service.reindex();
+    expect(peerWarnings(plain['warning']), 1);
+    expect(plain['warning'] as String, startsWith('Another RememBox process'));
+
+    // With a near-duplicate report: the report plus ONE peer warning.
+    await service.remember(text: 'second', project: 'Acme_App');
+    store.box<ProjectScope>().removeAll();
+    final withReport = await service.reindex();
+    final warning = withReport['warning'] as String;
+    expect(peerWarnings(warning), 1, reason: warning);
+    expect(warning, startsWith('2 newly registered project name(s)'));
+    final registry = withReport['registry'] as Map<String, Object?>;
+    expect(peerWarnings(registry['warning']), 1);
+  });
 }

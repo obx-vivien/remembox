@@ -247,6 +247,10 @@ extension MemoryServiceFacts on MemoryService {
 
     return _withSession('fact_set', () {
       return store.runInTransaction(TxMode.write, () {
+        // Strict registry mode: registered, non-merged project only –
+        // before _ensureProjectScope (which would register it). No-op in
+        // open mode.
+        _requireWritableProject(validatedProject, tool: 'fact_set');
         final ensured = _ensureProjectScope(
           validatedProject,
           reason: 'fact_set',

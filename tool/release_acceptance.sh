@@ -12,7 +12,10 @@
 # driver, tool/release_acceptance.dart, holds the details):
 #
 #   0. Layout + spawn environment – the zip unpacks to remembox/dist/ with
-#      executable launcher and binary, skill/SKILL.md and README.md, and
+#      executable launcher and binary, skill/SKILL.md, the setup templates
+#      (templates/cockpit.md, instructions-for-claude.md,
+#      global-CLAUDE.md – only for the zip under test; the previous
+#      release predates them) and README.md, and
 #      tool/smoke.sh passes on the UNPACKED launcher (foreign cwd,
 #      unlimited fd limit).
 #   A. Fresh install – empty store directory: `tools/list` equals the tools
@@ -65,6 +68,65 @@
 # The stores live in a temp dir under /tmp and hold synthetic data only;
 # it is removed on success and kept (path printed) on failure.
 set -euo pipefail
+
+# Unpacks $1 into $WORK/$2 and verifies the documented layout; prints the
+# launcher path. Everything a user runs or reads after unzipping must be
+# there, and the two executables must have survived the zip as executables.
+# $3 is the layout to expect: `current` (the zip under test – everything the
+# release ships today, including templates/) or `previous` (an older
+# published release used for the upgrade scenario – it predates
+# templates/, which were added after 0.3.1, so they are not required
+# there).
+unpack() {
+  local zip="$1" name="$2" layout="$3" root
+  root="$WORK/$name"
+  # unpack runs inside $(...), where errexit does not apply (bash 3.2): every
+  # failure needs an explicit exit, and the caller checks the status too.
+  if [ "$layout" != "current" ] && [ "$layout" != "previous" ]; then
+    echo "ERROR: unpack: unknown layout '$layout'" >&2
+    exit 1
+  fi
+  mkdir "$root" || { echo "ERROR: cannot create $root" >&2; exit 1; }
+  unzip -q "$zip" -d "$root" || { echo "ERROR: unzip failed for $zip" >&2; exit 1; }
+  local item
+  for item in remembox/dist/remembox remembox/dist/bin/remembox; do
+    if [ ! -x "$root/$item" ]; then
+      echo "ERROR: $zip does not unpack to an executable $item" >&2
+      exit 1
+    fi
+  done
+  # The dylib must sit next to the binary: without it the server falls back
+  # to /usr/local/lib and a broken zip would pass on a machine that has a
+  # system-installed ObjectBox library.
+  local required="remembox/dist/lib/libobjectbox.dylib remembox/skill/SKILL.md remembox/README.md remembox/LICENSE"
+  if [ "$layout" = "current" ]; then
+    required="$required remembox/templates/cockpit.md"
+    required="$required remembox/templates/instructions-for-claude.md remembox/templates/global-CLAUDE.md"
+  fi
+  for item in $required; do
+    if [ ! -f "$root/$item" ]; then
+      echo "ERROR: $zip does not contain $item" >&2
+      exit 1
+    fi
+  done
+  printf '%s\n' "$root/remembox/dist/remembox"
+}
+
+# Test hook: `RELEASE_ACCEPTANCE_LIB_ONLY=1 source tool/release_acceptance.sh`
+# defines unpack (set WORK yourself) without running any check
+# (test/templates_test.dart exercises it on synthetic zips). Honoured only
+# when SOURCED: executed with the variable set (e.g. a stray export while
+# tool/release.sh runs this script), it must never pass silently with zero
+# checks – it fails loudly instead.
+if [ "${RELEASE_ACCEPTANCE_LIB_ONLY:-}" = "1" ]; then
+  if (return 0 2>/dev/null); then
+    return 0
+  fi
+  echo "ERROR: RELEASE_ACCEPTANCE_LIB_ONLY=1 is a test hook for sourcing this" >&2
+  echo "       script; it must not be set when running the acceptance test." >&2
+  echo "       Unset it and re-run – no check was run." >&2
+  exit 1
+fi
 
 PREFLIGHT=false
 NEW_ZIP=""
@@ -129,38 +191,9 @@ finish() {
 }
 trap finish EXIT
 
-# Unpacks $1 into $WORK/$2 and verifies the documented layout; prints the
-# launcher path. Everything a user runs or reads after unzipping must be
-# there, and the two executables must have survived the zip as executables.
-unpack() {
-  local zip="$1" name="$2" root
-  root="$WORK/$name"
-  # unpack runs inside $(...), where errexit does not apply (bash 3.2): every
-  # failure needs an explicit exit, and the caller checks the status too.
-  mkdir "$root" || { echo "ERROR: cannot create $root" >&2; exit 1; }
-  unzip -q "$zip" -d "$root" || { echo "ERROR: unzip failed for $zip" >&2; exit 1; }
-  local item
-  for item in remembox/dist/remembox remembox/dist/bin/remembox; do
-    if [ ! -x "$root/$item" ]; then
-      echo "ERROR: $zip does not unpack to an executable $item" >&2
-      exit 1
-    fi
-  done
-  # The dylib must sit next to the binary: without it the server falls back
-  # to /usr/local/lib and a broken zip would pass on a machine that has a
-  # system-installed ObjectBox library.
-  for item in remembox/dist/lib/libobjectbox.dylib remembox/skill/SKILL.md remembox/README.md remembox/LICENSE; do
-    if [ ! -f "$root/$item" ]; then
-      echo "ERROR: $zip does not contain $item" >&2
-      exit 1
-    fi
-  done
-  printf '%s\n' "$root/remembox/dist/remembox"
-}
-
 echo "==> Release acceptance: $NEW_ZIP (expecting remembox $VERSION)"
-NEW_LAUNCHER="$(unpack "$NEW_ZIP" new)" || exit 1
-echo "PASS: layout – $(basename "$NEW_ZIP") unpacks to remembox/{dist,skill,README.md,LICENSE} with executable launcher and binary and the bundled dylib"
+NEW_LAUNCHER="$(unpack "$NEW_ZIP" new current)" || exit 1
+echo "PASS: layout – $(basename "$NEW_ZIP") unpacks to remembox/{dist,skill,templates,README.md,LICENSE} with executable launcher and binary and the bundled dylib"
 
 DRIVER_ARGS=(
   --new-launcher "$NEW_LAUNCHER"
@@ -171,7 +204,7 @@ DRIVER_ARGS=(
 )
 if [ -n "$PREVIOUS_ZIP" ]; then
   echo "==> Previous release for the upgrade scenario: $PREVIOUS_ZIP (expected afterwards: $DOWNGRADE)"
-  PREVIOUS_LAUNCHER="$(unpack "$PREVIOUS_ZIP" previous)" || exit 1
+  PREVIOUS_LAUNCHER="$(unpack "$PREVIOUS_ZIP" previous previous)" || exit 1
   DRIVER_ARGS+=(--previous-launcher "$PREVIOUS_LAUNCHER")
 fi
 

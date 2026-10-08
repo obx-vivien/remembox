@@ -11,6 +11,12 @@
 /// lib/objectbox-model.json`: only additions, no `-` line except the
 /// `last*Id` counters" (plan §4) — it runs that check every time, not just
 /// once at review time.
+///
+/// A second group does the same for the next schema change: the current
+/// model against the frozen 0.3.1 model (`test/fixtures/objectbox-model-
+/// 0.3.1.json`, copied before `TagDefinition` was generated) – every 0.3.1
+/// entity/property byte-identical, exactly two new entities
+/// (`TagDefinition`, `TagAlias`).
 library;
 
 import 'dart:convert';
@@ -90,6 +96,13 @@ void main() {
   final newModel = _loadModel('lib/objectbox-model.json');
   final oldEntities = _entities(oldModel);
   final newEntities = _entities(newModel);
+  // The 0.3.1 model, frozen before TagDefinition was added (strict
+  // registry mode). The 0.2.0 group's counter and added-entity tests
+  // describe the 0.2.0 -> 0.3.0 step itself, so they compare against this
+  // fixture (the model as that step left it) – the entity/property tests
+  // in that group still compare against the CURRENT model.
+  final model031 = _loadModel('test/fixtures/objectbox-model-0.3.1.json');
+  final entities031 = _entities(model031);
 
   group('model_compat (0.2.0 -> 0.3.0, areas and facts)', () {
     test('every 0.2.0 entity is present with identical id/name/flags/'
@@ -230,14 +243,14 @@ void main() {
     test('counters: lastEntityId.id == 9, lastRelationId unchanged, '
         'lastIndexId grew, modelVersion unchanged', () {
       expect(
-        _numericId(newModel['lastEntityId'] as String),
+        _numericId(model031['lastEntityId'] as String),
         9,
         reason:
             'addendum M1: 4 new entities (Area, AreaMembership, Fact, '
             'ProjectScope) on top of the 5 existing ones -> lastEntityId 9',
       );
       expect(
-        newModel['lastRelationId'],
+        model031['lastRelationId'],
         oldModel['lastRelationId'],
         reason:
             'addendum M1: area membership is a synced link ENTITY keyed '
@@ -245,17 +258,17 @@ void main() {
             'relation, lastRelationId must be byte-identical to 0.2.0',
       );
       expect(
-        _numericId(newModel['lastIndexId'] as String),
+        _numericId(model031['lastIndexId'] as String),
         greaterThan(_numericId(oldModel['lastIndexId'] as String)),
         reason: 'the new entities add indexed properties',
       );
-      expect(newModel['modelVersion'], oldModel['modelVersion']);
+      expect(model031['modelVersion'], oldModel['modelVersion']);
     });
 
     test('exactly the 4 new entities (Area, AreaMembership, Fact, '
         'ProjectScope) were added, nothing else', () {
       final oldIds = oldEntities.map((e) => e['id'] as String).toSet();
-      final addedEntities = newEntities.where((e) => !oldIds.contains(e['id']));
+      final addedEntities = entities031.where((e) => !oldIds.contains(e['id']));
       final addedNames = addedEntities.map((e) => e['name']).toSet();
       expect(
         addedNames,
@@ -266,6 +279,99 @@ void main() {
       // (6-9) — never a reused old slot.
       for (final e in addedEntities) {
         expect(_numericId(e['id'] as String), inInclusiveRange(6, 9));
+      }
+    });
+  });
+
+  group('model_compat (0.3.1 -> current, tag registry)', () {
+    test('every 0.3.1 entity is present with identical id/name/flags/'
+        'lastPropertyId', () {
+      for (final old in entities031) {
+        final id = old['id'] as String;
+        final current = _entityById(newEntities, id);
+        _expectSameFields(current, old, [
+          'id',
+          'name',
+          'flags',
+          'lastPropertyId',
+        ], 'entity $id (${old['name']})');
+      }
+    });
+
+    test('every 0.3.1 property and relation is byte-identical', () {
+      for (final old in entities031) {
+        final current = _entityById(newEntities, old['id'] as String);
+        final oldProps = _properties(old);
+        final newProps = _properties(current);
+        expect(
+          newProps.length,
+          oldProps.length,
+          reason: 'entity ${old['name']}: property count changed',
+        );
+        for (final oldProp in oldProps) {
+          final newProp = newProps.firstWhere(
+            (p) => p['id'] == oldProp['id'],
+            orElse: () => throw TestFailure(
+              'property ${oldProp['id']} (${oldProp['name']}) missing from '
+              'entity ${old['name']}',
+            ),
+          );
+          // Whole-map equality: id, name, type, flags, indexId,
+          // relationTarget – no field may change.
+          expect(
+            newProp,
+            oldProp,
+            reason: 'entity ${old['name']}, property ${oldProp['name']}',
+          );
+        }
+        expect(
+          _relations(current),
+          _relations(old),
+          reason: 'entity ${old['name']}: relations changed',
+        );
+      }
+    });
+
+    // Both entities are new since 0.3.1 and ship in the same release:
+    // TagDefinition (the tag register) and TagAlias (its alternative
+    // names).
+    test('exactly two new entities, TagDefinition at id 10 and TagAlias '
+        'at id 11', () {
+      final oldIds = entities031.map((e) => e['id'] as String).toSet();
+      final added = newEntities
+          .where((e) => !oldIds.contains(e['id']))
+          .toList();
+      expect(added.map((e) => e['name']), ['TagDefinition', 'TagAlias']);
+      expect(added.map((e) => _numericId(e['id'] as String)), [10, 11]);
+      expect(newEntities.length, entities031.length + 2);
+      for (final entity in added) {
+        expect(
+          _relations(entity),
+          isEmpty,
+          reason: '${entity['name']} is name-keyed, no relation to Tag',
+        );
+      }
+    });
+
+    test('counters: lastEntityId 11, lastRelationId and modelVersion '
+        'unchanged, lastIndexId grew by three, retired* still empty', () {
+      expect(_numericId(newModel['lastEntityId'] as String), 11);
+      expect(newModel['lastRelationId'], model031['lastRelationId']);
+      expect(newModel['modelVersion'], model031['modelVersion']);
+      expect(
+        _numericId(newModel['lastIndexId'] as String),
+        _numericId(model031['lastIndexId'] as String) + 3,
+        reason:
+            'TagDefinition.name, TagAlias.name and TagAlias.tag are the '
+            'only new indexes',
+      );
+      for (final key in [
+        'retiredEntityUids',
+        'retiredIndexUids',
+        'retiredPropertyUids',
+        'retiredRelationUids',
+      ]) {
+        expect(newModel[key], isEmpty, reason: key);
       }
     });
   });

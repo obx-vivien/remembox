@@ -626,6 +626,83 @@ final _entities = <obx_int.ModelEntity>[
     relations: <obx_int.ModelRelation>[],
     backlinks: <obx_int.ModelBacklink>[],
   ),
+  obx_int.ModelEntity(
+    id: const obx_int.IdUid(10, 4675476530381238902),
+    name: 'TagDefinition',
+    lastPropertyId: const obx_int.IdUid(5, 7533323827786907884),
+    flags: 2,
+    properties: <obx_int.ModelProperty>[
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(1, 278494581196598870),
+        name: 'id',
+        type: 6,
+        flags: 1,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(2, 7612704352828458977),
+        name: 'name',
+        type: 9,
+        flags: 32808,
+        indexId: const obx_int.IdUid(32, 8363882803295188346),
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(3, 6349472329315341493),
+        name: 'description',
+        type: 9,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(4, 7280173833089258787),
+        name: 'createdAt',
+        type: 10,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(5, 7533323827786907884),
+        name: 'updatedAt',
+        type: 10,
+        flags: 0,
+      ),
+    ],
+    relations: <obx_int.ModelRelation>[],
+    backlinks: <obx_int.ModelBacklink>[],
+  ),
+  obx_int.ModelEntity(
+    id: const obx_int.IdUid(11, 6621983207442784053),
+    name: 'TagAlias',
+    lastPropertyId: const obx_int.IdUid(4, 5231814236138763969),
+    flags: 2,
+    properties: <obx_int.ModelProperty>[
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(1, 5637718193947917552),
+        name: 'id',
+        type: 6,
+        flags: 1,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(2, 4851290316510130615),
+        name: 'name',
+        type: 9,
+        flags: 32808,
+        indexId: const obx_int.IdUid(33, 7142271812738074144),
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(3, 1055239682740896844),
+        name: 'tag',
+        type: 9,
+        flags: 8,
+        indexId: const obx_int.IdUid(34, 5402044076320548284),
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(4, 5231814236138763969),
+        name: 'createdAt',
+        type: 10,
+        flags: 0,
+      ),
+    ],
+    relations: <obx_int.ModelRelation>[],
+    backlinks: <obx_int.ModelBacklink>[],
+  ),
 ];
 
 /// Shortcut for [obx.Store.new] that passes [getObjectBoxModel] and for Flutter
@@ -670,8 +747,8 @@ obx_int.ModelDefinition getObjectBoxModel() {
     // Typically, this is done with `dart run build_runner build`.
     generatorVersion: obx_int.GeneratorVersion.v2025_12_16,
     entities: _entities,
-    lastEntityId: const obx_int.IdUid(9, 8094921654310938506),
-    lastIndexId: const obx_int.IdUid(31, 8201272485164127439),
+    lastEntityId: const obx_int.IdUid(11, 6621983207442784053),
+    lastIndexId: const obx_int.IdUid(34, 5402044076320548284),
     lastRelationId: const obx_int.IdUid(1, 7448594369450009005),
     lastSequenceId: const obx_int.IdUid(0, 0),
     retiredEntityUids: const [],
@@ -1431,6 +1508,108 @@ obx_int.ModelDefinition getObjectBoxModel() {
         return object;
       },
     ),
+    TagDefinition: obx_int.EntityDefinition<TagDefinition>(
+      model: _entities[9],
+      toOneRelations: (TagDefinition object) => [],
+      toManyRelations: (TagDefinition object) => {},
+      getId: (TagDefinition object) => object.id,
+      setId: (TagDefinition object, int id) {
+        object.id = id;
+      },
+      objectToFB: (TagDefinition object, fb.Builder fbb) {
+        final nameOffset = fbb.writeString(object.name);
+        final descriptionOffset = fbb.writeString(object.description);
+        fbb.startTable(6);
+        fbb.addInt64(0, object.id);
+        fbb.addOffset(1, nameOffset);
+        fbb.addOffset(2, descriptionOffset);
+        fbb.addInt64(3, object.createdAt.millisecondsSinceEpoch);
+        fbb.addInt64(4, object.updatedAt.millisecondsSinceEpoch);
+        fbb.finish(fbb.endTable());
+        return object.id;
+      },
+      objectFromFB: (obx.Store store, ByteData fbData) {
+        final buffer = fb.BufferContext(fbData);
+        final rootOffset = buffer.derefObject(0);
+        final idParam = const fb.Int64Reader().vTableGet(
+          buffer,
+          rootOffset,
+          4,
+          0,
+        );
+        final nameParam = const fb.StringReader(
+          asciiOptimization: true,
+        ).vTableGet(buffer, rootOffset, 6, '');
+        final descriptionParam = const fb.StringReader(
+          asciiOptimization: true,
+        ).vTableGet(buffer, rootOffset, 8, '');
+        final createdAtParam = DateTime.fromMillisecondsSinceEpoch(
+          const fb.Int64Reader().vTableGet(buffer, rootOffset, 10, 0),
+          isUtc: true,
+        );
+        final updatedAtParam = DateTime.fromMillisecondsSinceEpoch(
+          const fb.Int64Reader().vTableGet(buffer, rootOffset, 12, 0),
+          isUtc: true,
+        );
+        final object = TagDefinition(
+          id: idParam,
+          name: nameParam,
+          description: descriptionParam,
+          createdAt: createdAtParam,
+          updatedAt: updatedAtParam,
+        );
+
+        return object;
+      },
+    ),
+    TagAlias: obx_int.EntityDefinition<TagAlias>(
+      model: _entities[10],
+      toOneRelations: (TagAlias object) => [],
+      toManyRelations: (TagAlias object) => {},
+      getId: (TagAlias object) => object.id,
+      setId: (TagAlias object, int id) {
+        object.id = id;
+      },
+      objectToFB: (TagAlias object, fb.Builder fbb) {
+        final nameOffset = fbb.writeString(object.name);
+        final tagOffset = fbb.writeString(object.tag);
+        fbb.startTable(5);
+        fbb.addInt64(0, object.id);
+        fbb.addOffset(1, nameOffset);
+        fbb.addOffset(2, tagOffset);
+        fbb.addInt64(3, object.createdAt.millisecondsSinceEpoch);
+        fbb.finish(fbb.endTable());
+        return object.id;
+      },
+      objectFromFB: (obx.Store store, ByteData fbData) {
+        final buffer = fb.BufferContext(fbData);
+        final rootOffset = buffer.derefObject(0);
+        final idParam = const fb.Int64Reader().vTableGet(
+          buffer,
+          rootOffset,
+          4,
+          0,
+        );
+        final nameParam = const fb.StringReader(
+          asciiOptimization: true,
+        ).vTableGet(buffer, rootOffset, 6, '');
+        final tagParam = const fb.StringReader(
+          asciiOptimization: true,
+        ).vTableGet(buffer, rootOffset, 8, '');
+        final createdAtParam = DateTime.fromMillisecondsSinceEpoch(
+          const fb.Int64Reader().vTableGet(buffer, rootOffset, 10, 0),
+          isUtc: true,
+        );
+        final object = TagAlias(
+          id: idParam,
+          name: nameParam,
+          tag: tagParam,
+          createdAt: createdAtParam,
+        );
+
+        return object;
+      },
+    ),
   };
 
   return obx_int.ModelDefinition(model, bindings);
@@ -1838,5 +2017,56 @@ class ProjectScope_ {
   /// See [ProjectScope.updatedAt].
   static final updatedAt = obx.QueryDateProperty<ProjectScope>(
     _entities[8].properties[7],
+  );
+}
+
+/// [TagDefinition] entity fields to define ObjectBox queries.
+class TagDefinition_ {
+  /// See [TagDefinition.id].
+  static final id = obx.QueryIntegerProperty<TagDefinition>(
+    _entities[9].properties[0],
+  );
+
+  /// See [TagDefinition.name].
+  static final name = obx.QueryStringProperty<TagDefinition>(
+    _entities[9].properties[1],
+  );
+
+  /// See [TagDefinition.description].
+  static final description = obx.QueryStringProperty<TagDefinition>(
+    _entities[9].properties[2],
+  );
+
+  /// See [TagDefinition.createdAt].
+  static final createdAt = obx.QueryDateProperty<TagDefinition>(
+    _entities[9].properties[3],
+  );
+
+  /// See [TagDefinition.updatedAt].
+  static final updatedAt = obx.QueryDateProperty<TagDefinition>(
+    _entities[9].properties[4],
+  );
+}
+
+/// [TagAlias] entity fields to define ObjectBox queries.
+class TagAlias_ {
+  /// See [TagAlias.id].
+  static final id = obx.QueryIntegerProperty<TagAlias>(
+    _entities[10].properties[0],
+  );
+
+  /// See [TagAlias.name].
+  static final name = obx.QueryStringProperty<TagAlias>(
+    _entities[10].properties[1],
+  );
+
+  /// See [TagAlias.tag].
+  static final tag = obx.QueryStringProperty<TagAlias>(
+    _entities[10].properties[2],
+  );
+
+  /// See [TagAlias.createdAt].
+  static final createdAt = obx.QueryDateProperty<TagAlias>(
+    _entities[10].properties[3],
   );
 }

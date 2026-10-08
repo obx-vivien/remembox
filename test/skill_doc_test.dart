@@ -53,8 +53,9 @@ void main() {
       // Sanity floor: catches a regex silently broken by a future refactor
       // of server.dart (e.g. a rename of the `Tool(` constructor call)
       // returning zero or a suspiciously small tool list instead of failing
-      // loudly. 20 is comfortably below the 23 tools registered as of
-      // 0.3.1, so raising the tool count further will not make this flaky.
+      // loudly. 20 is comfortably below the 24 tools registered since
+      // tag_define was added, so raising the tool count further will not
+      // make this flaky.
       expect(
         toolNames.length,
         greaterThanOrEqualTo(20),

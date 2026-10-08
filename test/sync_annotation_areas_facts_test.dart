@@ -147,4 +147,67 @@ void main() {
       expect(rereadNew.explainedBy.targetId, entryId);
     },
   );
+
+  test(
+    'KNOWN PITFALL: put() on TagDefinition WITHOUT any sync client fails '
+    'with OBX 10001; a STARTED local-activation client makes it work',
+    () {
+      expect(
+        () => store.box<TagDefinition>().put(
+          TagDefinition(name: 'lesson', description: 'What we learned.'),
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('sync-enabled type'), contains('10001')),
+          ),
+        ),
+      );
+
+      final client = SyncClient(
+        store,
+        [localActivationSyncUrl],
+        [SyncCredentials.none()],
+      )..start();
+      addTearDown(client.close);
+
+      final id = store.box<TagDefinition>().put(
+        TagDefinition(name: 'lesson', description: 'What we learned.'),
+      );
+      expect(id, greaterThan(0));
+      expect(store.box<TagDefinition>().get(id)!.name, 'lesson');
+    },
+  );
+
+  test(
+    'KNOWN PITFALL: put() on TagAlias WITHOUT any sync client fails with '
+    'OBX 10001; a STARTED local-activation client makes it work',
+    () {
+      expect(
+        () => store.box<TagAlias>().put(
+          TagAlias(name: 'chores', tag: 'housework'),
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('sync-enabled type'), contains('10001')),
+          ),
+        ),
+      );
+
+      final client = SyncClient(
+        store,
+        [localActivationSyncUrl],
+        [SyncCredentials.none()],
+      )..start();
+      addTearDown(client.close);
+
+      final id = store.box<TagAlias>().put(
+        TagAlias(name: 'chores', tag: 'housework'),
+      );
+      expect(store.box<TagAlias>().get(id)!.tag, 'housework');
+    },
+  );
 }

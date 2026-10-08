@@ -39,6 +39,19 @@ Good: "2026-08-26: Chose SQLite over Postgres for the invoicing tool because
 it ships as a single file and the team has no ops capacity."
 Bad: "We talked about databases today."
 
+**Read `related` after every `remember` and `supersede`.** The result lists
+up to five existing entries that look like the same thing (when none
+qualifies, the key is absent). An item marked `likelySameThing: true` is
+probably an older state of what you just wrote: `supersede` it (prose) or
+`fact_set` (one exact value) instead of leaving two versions. Other items:
+if it is another thing that belongs with the new entry, link it – with
+`link`, or by passing `links` (`toId`, `type`, optional `note`) in the
+`remember` call itself. Always link people, cases and objects that already
+have entries. An item marked `weak: true` is only a possible predecessor –
+check it before linking. If `relatedMore` is present, further candidates were not shown
+(with `relatedMoreIsLowerBound: true` the number is only a minimum and may be 0) – `recall`
+lists them all.
+
 ## What to store
 
 - **Decisions** – with date and the *why*. The reasoning is what prevents the
@@ -93,6 +106,35 @@ are two different projects to the store, even if they mean the same thing to
 you – pick one spelling and stick to it. Use `tags` for cross-cutting topics
 (see "Tags" below); tags are labels, never a `recall` filter.
 
+## The register: look up, register, use
+
+Project names and tags come from a register. Before every write:
+
+1. **Look up.** `areas_list` lists every registered project (`projects`,
+   with description and areas; `mergedProjects` shows old names and where
+   they went). `tags_list` lists every tag with `registered`, its
+   `description` and its `aliases` (alternative names); its `prefix` also
+   finds a tag by an alias. Use an existing name whenever one fits.
+2. **Register** only when nothing fits: a new project with `project_set`
+   (`name` plus a one-sentence `description`), a new tag with `tag_define`
+   (`name` plus a one-sentence `description` of what the tag marks, and
+   `addAliases` for old spellings or synonyms, e.g. `chores` for
+   `housework`; `aliases` replaces the whole set, so prefer
+   `addAliases`/`removeAliases`).
+3. **Use** the registered name – never a spelling variant of it. If you
+   use an alias anyway, the server stores the tag it belongs to and says
+   so in `warning`.
+
+The server may run in strict registry mode (`registryMode: strict` in
+`areas_list`/`tags_list`/`stats`). Then a write with an unregistered or
+merged project, or an unregistered tag, is rejected and nothing is stored;
+the error names similar registered names and what to register. Read it,
+fix the call, retry – don't work around it with a new spelling. In strict
+mode `project_set` also rejects a name that differs from a registered one
+only by case/space/-/_ (and `tag_define` one that differs only by case,
+plural or separators) unless you pass `allowSimilar: true` – do that only
+when the user confirms it really is something different.
+
 ## Areas and projects
 
 `project` stays the topic – one memory belongs to exactly one project. An
@@ -116,8 +158,9 @@ updates the description). `project_set` then creates or updates a project's
 registry row – description, lifecycle status (`active`/`archived`), and area
 membership via `addAreas`/`removeAreas`. `project_set` never auto-creates an
 area, so call `area_set` first or the write is rejected naming the missing
-one. When you start work under a new project name, call `project_set` to file
-it under its area(s) right away rather than leaving it unregistered.
+one. Before you write under a new project name, call `project_set` with a
+one-sentence `description` (and `addAreas`) – in strict registry mode a
+write under an unregistered project is rejected.
 
 `project_merge` and `entries_move` are maintenance tools that **rewrite
 stored data** – run them only when the user explicitly asks, never on your
@@ -185,22 +228,35 @@ A tag is **dropped** only when it exactly matches the entry's project name,
 one of the five memory kinds, or an area the entry's project belongs to –
 those are already filterable, so the duplicate is pure noise. A tag that
 merely *looks like* one of those (a near-duplicate, not an exact match), or
-that looks like an identifier or version number, is **kept** but flagged in
-the result's `warning` field – the server warns instead of guessing whether
-you meant it. Read that field, don't assume a write stored exactly what you
+that looks like an identifier or version number, is **kept** (in strict
+mode only if registered) but flagged in the result's `warning` field – the
+server warns instead of guessing whether you meant it. Read that field, don't assume a write stored exactly what you
 expect without checking it.
 
 **Check before inventing.** Call `tags_list` before adding a tag that might
 already exist under a different spelling – it returns every tag with its
-live usage count, `variantGroups` (existing tags that look like spelling
-variants of each other), and an `unused` count. Reuse what's already there.
+live usage count, whether it is `registered` (with its `description`),
+`variantGroups` (existing tags that look like spelling variants of each
+other), and an `unused` count. Reuse what's already there; register a
+genuinely new tag with `tag_define` before using it (see "The register"
+above). `tag_define` rejects a name that repeats a project, a kind or an
+area, the same rule that drops such a tag on `remember`.
 
 `tag_merge`, `tag_remove`, and `tags_normalize` are maintenance tools that
 rewrite the tag graph across every entry that carries the affected tags –
 run them only when the user asks, and pass `dryRun: true` first to see the
-effect before writing. `tags_normalize` is a one-shot upgrade helper: run it
+effect before writing. They keep the register consistent: a merge carries a
+registered spelling's description over to the target, and `tag_remove`
+also removes the registration. `tags_normalize` is a one-shot upgrade helper: run it
 once after moving a store from a version older than 0.3.0 to fold every
 pre-existing tag spelling into today's camelCase form.
+
+When the user asks to clean up tags into a register, keep this order:
+`tag_define` every kept tag and every merge target first (synonyms stay
+undefined), then `tag_merge` each synonym group (`dryRun: true` first,
+check `aliasesAdded`), then `tag_remove` what goes, and finally check
+`tags_list` for `unregisteredInUse: 0` and `aliasesInUse: 0`. A merge into
+an unregistered target records no aliases (the result warns).
 
 ## First-run interview
 

@@ -73,6 +73,27 @@ List<int> _requireMoveIds(List<int> ids) {
   return ids;
 }
 
+/// The warning text for [MemoryServiceAreas.backfillProjectRegistry]'s
+/// `nearDuplicates` report – ONE builder, used for the backfill result
+/// and for `reindex`'s top-level `warning` (which must not copy the
+/// backfill's whole `warning`: that already carries the peer-guard
+/// warning, and reindex appends its own).
+String _nearDuplicateRegistryWarning(
+  List<Map<String, Object?>> nearDuplicates,
+) {
+  String q(Object? n) => '"${MemoryService.sanitizeForLog(n! as String)}"';
+  final listed = nearDuplicates
+      .map(
+        (d) => '${q(d['name'])} (like '
+            '${(d['similarTo']! as List).map(q).join(', ')})',
+      )
+      .join(', ');
+  return '${nearDuplicates.length} newly registered project name(s) '
+      'differ from another registered name only by case/space/-/_: '
+      '$listed. Merge the variants with project_merge (dryRun first) '
+      'before switching to strict registry mode.';
+}
+
 extension MemoryServiceAreas on MemoryService {
   // ---------------------------------------------------------------------
   // areasList
@@ -89,6 +110,11 @@ extension MemoryServiceAreas on MemoryService {
   /// count is a `count()`/distinct-property query – no `getAll()`. One
   /// lending, one read transaction, so every count below is a consistent
   /// snapshot.
+  ///
+  /// Also (2026-10-06, strict registry mode) the register itself:
+  /// `projects` (every non-merged [ProjectScope] row – name, status,
+  /// description, areas – sorted by name), `mergedProjects` (tombstones
+  /// with `mergedInto`) and `registryMode`.
   ///
   /// Archived projects are listed like any other (each marked with its
   /// `status`) and counted in every total: `status` is informational in
@@ -108,9 +134,14 @@ extension MemoryServiceAreas on MemoryService {
         // box-wide entry/fact data), so a full page-through is cheap and
         // gives us the status lookup the rest of this method needs.
         final projectStatus = <String, String>{};
+        // Tag registry / strict registry mode (2026-10-06): the full
+        // registered-project list (`projects`, `mergedProjects` below), so a
+        // caller can look a name up before writing. Same page-through.
+        final projectRows = <ProjectScope>[];
         _pageThrough<ProjectScope>(_projects.query(), (page) {
           for (final p in page) {
             projectStatus[p.name] = p.status;
+            projectRows.add(p);
           }
         });
 
@@ -133,6 +164,9 @@ extension MemoryServiceAreas on MemoryService {
         // merged ones" rule lives in exactly one place – the same one
         // `recall`/`stats`/`fact_query`'s `area` filter also use.
         final projectsInMemberships = <String>{};
+        // project -> areas it belongs to (existing areas only), for the
+        // `projects` list below.
+        final areasByProject = <String, Set<String>>{};
         var membershipsWithoutArea = 0;
         var membershipsWithoutProjectRows = 0;
         // A project can hold a live AreaMembership row while its own
@@ -148,6 +182,7 @@ extension MemoryServiceAreas on MemoryService {
               membershipsWithoutArea++;
               continue;
             }
+            (areasByProject[m.project] ??= <String>{}).add(m.area);
             if (!projectStatus.containsKey(m.project)) {
               membershipsWithoutProjectRows++;
               continue;
@@ -286,8 +321,30 @@ extension MemoryServiceAreas on MemoryService {
           );
         }
 
+        // Every registered, non-merged project (active and archived),
+        // sorted by name, and every merged tombstone with its target – the
+        // register a strict-mode caller looks names up in.
+        final projectsOut = <Map<String, Object?>>[];
+        final mergedOut = <Map<String, Object?>>[];
+        projectRows.sort((a, b) => a.name.compareTo(b.name));
+        for (final p in projectRows) {
+          if (p.status == ProjectStatus.merged) {
+            mergedOut.add({'name': p.name, 'mergedInto': p.mergedInto});
+            continue;
+          }
+          projectsOut.add({
+            'name': p.name,
+            'status': p.status,
+            'description': p.description,
+            'areas': (areasByProject[p.name]?.toList() ?? <String>[])..sort(),
+          });
+        }
+
         return {
           'areas': areasOut,
+          'projects': projectsOut,
+          'mergedProjects': mergedOut,
+          'registryMode': registryMode.name,
           'projectsWithoutArea': projectsWithoutArea,
           'unregisteredProjects': unregisteredProjects,
           'membershipsWithoutArea': membershipsWithoutArea,
@@ -379,6 +436,29 @@ extension MemoryServiceAreas on MemoryService {
 
     return _withSession('project_merge', () {
       return store.runInTransaction(dryRun ? TxMode.read : TxMode.write, () {
+        // Strict registry mode: "into" must already have a registry row
+        // (any status – merging into an archived or tombstoned project is
+        // allowed, see intoReactivated below); otherwise this merge would
+        // register a brand-new name with no description. Checked first,
+        // for a dry run too. Open mode keeps creating it.
+        if (registryMode == RegistryMode.strict) {
+          final intoRows = _useQuery(
+            _projects.query(
+              ProjectScope_.name.equals(validatedInto, caseSensitive: true),
+            ),
+            (q) => q.count(),
+          );
+          if (intoRows == 0) {
+            _rejectStrict(
+              'project_merge',
+              'project_merge: "into" '
+              '(${MemoryServiceRegistry._quoted(validatedInto)}) is not '
+              'registered (strict registry mode) – register it first with '
+              'project_set (with a description), then retry. Nothing was '
+              'changed.',
+            );
+          }
+        }
         final fromScope = _useQuery(
           _projects.query(
             ProjectScope_.name.equals(validatedFrom, caseSensitive: true),
@@ -683,6 +763,10 @@ extension MemoryServiceAreas on MemoryService {
 
     return _withSession('entries_move', () {
       return store.runInTransaction(dryRun ? TxMode.read : TxMode.write, () {
+        // Strict registry mode: the target must be a registered,
+        // non-merged project – checked first, for a dry run too (it
+        // reports what a real run would do). No-op in open mode.
+        _requireWritableProject(validatedTo, tool: 'entries_move');
         // Every requested id must exist – one getMany round-trip (not one
         // query per id), checked BEFORE any mutation so a missing id rolls
         // the whole transaction back with nothing written.
@@ -868,9 +952,13 @@ extension MemoryServiceAreas on MemoryService {
     return _withSession('backfill_project_registry', () {
       return store.runInTransaction(dryRun ? TxMode.read : TxMode.write, () {
         final registered = <String>{};
+        // Merged tombstones, for the near-duplicate report below: never
+        // advise merging into one of those.
+        final mergedRows = <String, ProjectScope>{};
         _pageThrough<ProjectScope>(_projects.query(), (page) {
           for (final p in page) {
             registered.add(p.name);
+            if (p.status == ProjectStatus.merged) mergedRows[p.name] = p;
           }
         });
 
@@ -879,6 +967,7 @@ extension MemoryServiceAreas on MemoryService {
         var registeredCount = 0;
         var alreadyRegistered = 0;
         var skippedBlank = 0;
+        final newlyRegistered = <String>[];
         for (final name in usedProjects) {
           // The shared blank rule (trim().isEmpty), not just the exact
           // empty string – a whitespace-only legacy project name must not
@@ -904,7 +993,45 @@ extension MemoryServiceAreas on MemoryService {
               '"${MemoryService.sanitizeForLog(name)}" (id ${scope.id})',
             );
           }
+          newlyRegistered.add(name);
           registeredCount++;
+        }
+
+        // 2026-10-06 (strict registry mode): this backfill registers every
+        // name in use without the near-duplicate check project_set applies
+        // in strict mode, so it reports each newly registered name whose
+        // ScopeKey matches another registered (or newly registered) name –
+        // candidates for project_merge before switching to strict mode.
+        // Computed over names only, so a dry run reports the same.
+        final byKey = <String, Set<String>>{};
+        for (final name in {...registered, ...newlyRegistered}) {
+          final key = ScopeKey.of(name);
+          if (key.isEmpty) continue;
+          (byKey[key] ??= <String>{}).add(name);
+        }
+        final nearDuplicates = <Map<String, Object?>>[];
+        for (final name in newlyRegistered..sort()) {
+          final key = ScopeKey.of(name);
+          // A merged variant is replaced by the project it resolves to now
+          // (_resolveMergeChain) – or dropped if its chain is broken – so
+          // the advice never names a tombstone as a merge target.
+          final others = <String>{};
+          for (final other in byKey[key] ?? const <String>{}) {
+            final merged = mergedRows[other];
+            final resolved = merged == null
+                ? other
+                : _resolveMergeChain(merged).target;
+            if (resolved != null && resolved != name) others.add(resolved);
+          }
+          if (others.isEmpty) continue;
+          final similarTo = others.toList()..sort();
+          nearDuplicates.add({'name': name, 'similarTo': similarTo});
+          log(
+            '[memory] backfill_project_registry: '
+            '"${MemoryService.sanitizeForLog(name)}" differs from '
+            '${similarTo.map((n) => '"${MemoryService.sanitizeForLog(n)}"').join(', ')} '
+            'only by case/space/-/_ (merged names resolved to their target)',
+          );
         }
 
         log(
@@ -919,6 +1046,10 @@ extension MemoryServiceAreas on MemoryService {
           'alreadyRegistered': alreadyRegistered,
           'dryRun': dryRun,
         };
+        if (nearDuplicates.isNotEmpty) {
+          result['nearDuplicates'] = nearDuplicates;
+          result['warning'] = _nearDuplicateRegistryWarning(nearDuplicates);
+        }
         return dryRun ? result : _applyGuardPeerWarning(result);
       });
     });

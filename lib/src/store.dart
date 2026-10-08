@@ -117,6 +117,45 @@ enum StoreMode {
   }
 }
 
+/// How strictly write paths treat project names and tags that are not in
+/// the registry yet (`OBX_MEMORY_REGISTRY_MODE`).
+///
+/// - [open] (default): a new project name is registered on its first
+///   write (`_ensureProjectScope`, logged) and a new tag is simply created
+///   (`_getOrCreateTag`); nothing is rejected, warnings only for
+///   near-duplicates and merged project names.
+/// - [strict]: a write that names a project without a registry row (or a
+///   merged one) or a tag without a `TagDefinition` row is REJECTED with an
+///   actionable message and nothing is written. Projects are registered
+///   with `project_set` (with a description), tags with `tag_define`.
+///
+/// Read tools and the maintenance tools behave the same in both modes;
+/// every process attached to one store (and every Sync device) should run
+/// with the same mode – it is per process, not stored.
+enum RegistryMode {
+  open,
+  strict;
+
+  /// Parses the raw `OBX_MEMORY_REGISTRY_MODE` value: trimmed and
+  /// lowercased; `null` or empty means [open]. Anything else is rejected
+  /// with an [ArgumentError] naming the variable and the value – never
+  /// silently treated as [open], since a typo in `strict` would otherwise
+  /// quietly switch the protection off.
+  static RegistryMode parse(String? raw) {
+    switch ((raw ?? '').trim().toLowerCase()) {
+      case '':
+      case 'open':
+        return RegistryMode.open;
+      case 'strict':
+        return RegistryMode.strict;
+      default:
+        throw ArgumentError(
+          'OBX_MEMORY_REGISTRY_MODE must be "open" or "strict", got "$raw".',
+        );
+    }
+  }
+}
+
 /// Runtime configuration, sourced from environment variables with defaults.
 class MemoryConfig {
   /// Directory holding the ObjectBox store.
@@ -180,6 +219,15 @@ class MemoryConfig {
   /// operator can tell "you asked for this" apart from "this was inferred".
   final bool storeModeExplicit;
 
+  /// See [RegistryMode]; from `OBX_MEMORY_REGISTRY_MODE`, default
+  /// [RegistryMode.open].
+  final RegistryMode registryMode;
+
+  /// Whether [registryMode] came from a non-empty
+  /// `OBX_MEMORY_REGISTRY_MODE` value (logged at startup, same idea as
+  /// [storeModeExplicit]).
+  final bool registryModeExplicit;
+
   MemoryConfig({
     required this.storeDir,
     required this.embedModel,
@@ -194,6 +242,8 @@ class MemoryConfig {
     required this.exclusive,
     required this.storeMode,
     required this.storeModeExplicit,
+    this.registryMode = RegistryMode.open,
+    this.registryModeExplicit = false,
   }) {
     // 2026-09-01, the 2026-09-01 store-gate engineering log (internal),
     // (plan §1.2): gated mode opens/closes the store per request — a live
@@ -317,6 +367,10 @@ class MemoryConfig {
       syncUrlSet: syncUrl.isNotEmpty,
       serveMode: serveMode,
     );
+    final rawRegistryMode = e['OBX_MEMORY_REGISTRY_MODE'];
+    final registryMode = RegistryMode.parse(rawRegistryMode);
+    final registryModeExplicit =
+        rawRegistryMode != null && rawRegistryMode.trim().isNotEmpty;
 
     return MemoryConfig(
       storeDir: e['OBX_MEMORY_DIR'] ?? p.join(home, '.remembox'),
@@ -332,7 +386,29 @@ class MemoryConfig {
       exclusive: exclusive,
       storeMode: storeMode,
       storeModeExplicit: storeModeExplicit,
+      registryMode: registryMode,
+      registryModeExplicit: registryModeExplicit,
     );
+  }
+
+  /// The `[startup] registry mode: …` line `bin/remembox.dart` logs right
+  /// after the store-mode line – names the mode, where it came from and
+  /// what it means for writes.
+  String registryModeStartupLine() {
+    switch (registryMode) {
+      case RegistryMode.strict:
+        return '[startup] registry mode: strict (OBX_MEMORY_REGISTRY_MODE) '
+            '– writes with an unregistered project or tag are rejected; '
+            'register with project_set / tag_define first';
+      case RegistryMode.open:
+        final source = registryModeExplicit
+            ? 'OBX_MEMORY_REGISTRY_MODE set explicitly'
+            : 'default';
+        return '[startup] registry mode: open ($source) – a new project '
+            'name is registered on first write (logged), a new tag is simply '
+            'created; nothing is rejected, warnings only for near-duplicates '
+            'and merged project names';
+    }
   }
 
   /// Human-readable description of the recall ranking formula, logged once

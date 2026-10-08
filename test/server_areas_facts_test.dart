@@ -130,11 +130,11 @@ void main() {
   }
 
   group('server metadata', () {
-    test('serverVersion is 0.3.1', () {
-      expect(serverVersion, '0.3.1');
+    test('serverVersion is 0.4.0', () {
+      expect(serverVersion, '0.4.0');
     });
 
-    test('the MCP initialize handshake reports serverInfo.version 0.3.1', () async {
+    test('the MCP initialize handshake reports serverInfo.version 0.4.0', () async {
       // Re-verifies via the protocol itself (not just the Dart constant):
       // a second connection over a fresh channel pair, same server.
       final toServer = StreamController<String>();
@@ -161,7 +161,7 @@ void main() {
           clientInfo: freshClient.implementation,
         ),
       );
-      expect(initResult.serverInfo.version, '0.3.1');
+      expect(initResult.serverInfo.version, '0.4.0');
       await freshClient.shutdown();
     });
   });

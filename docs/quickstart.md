@@ -119,6 +119,36 @@ don't replace the whole file, or the other entries will be lost.
 Save, then fully quit and reopen Claude Desktop (`⌘Q`, not just closing
 the window).
 
+**Optional: let the server enforce your project names and tags.** By
+default a new project name is registered on first write (logged) and a
+new tag is simply created – nothing is rejected, warnings only for
+near-duplicates and merged project names. In strict registry mode RememBox rejects a write with a
+project or tag you haven't registered yet (with `project_set` or
+`tag_define`), so no session can invent a new spelling. To turn it on,
+add the setting to the registration – for Claude Code (if RememBox is
+already registered, remove it first:
+`claude mcp remove remembox --scope user`, then):
+
+```bash
+claude mcp add remembox --scope user -e OBX_MEMORY_REGISTRY_MODE=strict -- ~/remembox/dist/remembox
+```
+
+For the Desktop app, add an `env` entry next to `command`, then fully
+quit and reopen Claude Desktop (`⌘Q`):
+
+```json
+"remembox": {
+  "command": "/path/to/remembox/dist/remembox",
+  "env": { "OBX_MEMORY_REGISTRY_MODE": "strict" }
+}
+```
+
+With strict mode on, Claude registers the project (`project_set`) before
+the first save – that extra step is expected. Use the same setting in
+every app you connect. On a brand-new memory you
+can switch it on right away; for an existing one, follow the checklist in
+the [usage guide](usage-guide.md#strict-registry-mode) first.
+
 ## Step 5: Make the rules load in every session
 
 This step is what makes RememBox work reliably, so please don't skip it.
@@ -145,16 +175,28 @@ loaded every time:
   so if you use both, paste the block in both places.
 
 ```text
-Memory (RememBox): Before any non-trivial task, call recall first; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Before using a new project name, call areas_list and pick an existing one. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry, check tags_list first; never use a project name, an area name or an identifier as a tag. Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember). Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
 ```
 
 Replace the project list (`family, private, …`) with your own – short,
 stable names for the areas of your life or work you want to keep apart.
+The first sentence refers to a small `cockpit.md` with the current state
+of your topics (the "Now" layer in the
+[usage guide](usage-guide.md#1-the-cockpit-what-matters-right-now)) –
+drop it if you don't keep one.
 Keep the block short, because it is loaded into every chat, and keep both
 places identical whenever you change the list. Changes reliably apply to
 new sessions – start a new chat after editing. The
 [usage guide](usage-guide.md#6-making-the-rules-load-every-time) explains
 the details.
+
+Ready-made files are in the `templates` folder of the unzipped `remembox`
+folder: `instructions-for-claude.md` (this block),
+`global-CLAUDE.md` (a fuller version for `~/.claude/CLAUDE.md`, Claude
+Code only) and `cockpit.md` (an example cockpit to adapt). Save your
+cockpit somewhere permanent and replace `cockpit.md` in the block with its
+full path. Clients with local file access (Claude Code, Cowork) then read
+it at the start of every session; the web and mobile apps cannot.
 
 ## Step 6: Test it 🎉
 

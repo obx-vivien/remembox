@@ -71,6 +71,8 @@ class StoreSession {
   final Box<Area> areas;
   final Box<AreaMembership> memberships;
   final Box<Fact> facts;
+  final Box<TagDefinition> tagDefinitions;
+  final Box<TagAlias> tagAliases;
 
   StoreSession(this.store)
     : entries = store.box<MemoryEntry>(),
@@ -81,7 +83,9 @@ class StoreSession {
       projects = store.box<ProjectScope>(),
       areas = store.box<Area>(),
       memberships = store.box<AreaMembership>(),
-      facts = store.box<Fact>();
+      facts = store.box<Fact>(),
+      tagDefinitions = store.box<TagDefinition>(),
+      tagAliases = store.box<TagAlias>();
 }
 
 /// Zone key marking "we are inside an executing [StoreGate.withStore]

@@ -335,4 +335,109 @@ void main() {
       await stderrSub.cancel();
     },
   );
+
+  test(
+    'an invalid OBX_MEMORY_REGISTRY_MODE fails startup naming the variable, '
+    'before the store directory is touched',
+    () async {
+      final tempDir = Directory.systemTemp.createTempSync(
+        'remembox_main_registry_bogus_',
+      );
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+
+      final result = await Process.run(
+        Platform.resolvedExecutable,
+        ['run', 'bin/remembox.dart'],
+        environment: {
+          'OBX_MEMORY_REGISTRY_MODE': 'bogus',
+          'OBX_MEMORY_DIR': tempDir.path,
+          'OBX_MEMORY_STORE_MODE': '',
+          'OBX_MEMORY_SYNC_URL': '',
+          'OBX_MEMORY_AUTO_PULL': 'false',
+        },
+      );
+
+      expect(
+        result.exitCode,
+        isNot(0),
+        reason: 'stdout: ${result.stdout}\nstderr: ${result.stderr}',
+      );
+      expect(
+        result.stderr.toString(),
+        allOf(contains('OBX_MEMORY_REGISTRY_MODE'), contains('"bogus"')),
+      );
+      expect(
+        Directory(tempDir.path).listSync(),
+        isEmpty,
+        reason: 'a config-time rejection must not create any lock file',
+      );
+    },
+  );
+
+  test(
+    'OBX_MEMORY_REGISTRY_MODE=strict logs the strict registry-mode '
+    'startup line',
+    () async {
+      final tempDir = Directory.systemTemp.createTempSync(
+        'remembox_main_registry_strict_',
+      );
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final proc = await Process.start(
+        Platform.resolvedExecutable,
+        ['run', 'bin/remembox.dart'],
+        environment: {
+          'OBX_MEMORY_DIR': tempDir.path,
+          'OBX_MEMORY_REGISTRY_MODE': 'strict',
+          'OBX_MEMORY_STORE_MODE': '',
+          'OBX_MEMORY_SYNC_URL': '',
+          'OBX_MEMORY_AUTO_PULL': 'false',
+        },
+      );
+      addTearDown(() => proc.kill(ProcessSignal.sigkill));
+
+      final stderrLines = <String>[];
+      final sawTargetLine = Completer<void>();
+      const targetLine =
+          '[startup] registry mode: strict (OBX_MEMORY_REGISTRY_MODE) – '
+          'writes with an unregistered project or tag are rejected; '
+          'register with project_set / tag_define first';
+      final stderrSub = proc.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+            stderrLines.add(line);
+            if (line.contains(targetLine) && !sawTargetLine.isCompleted) {
+              sawTargetLine.complete();
+            }
+          });
+      // stdin EOF: the stdio server shuts down normally once attached
+      // (same pattern as the gated (default) test above).
+      unawaited(proc.stdin.close());
+
+      await sawTargetLine.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          fail(
+            'never saw the strict registry-mode startup line; stderr so '
+            'far:\n${stderrLines.join('\n')}',
+          );
+        },
+      );
+      final exitCode = await proc.exitCode.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          proc.kill(ProcessSignal.sigkill);
+          fail(
+            'process did not exit after stdin EOF; stderr so far:\n'
+            '${stderrLines.join('\n')}',
+          );
+        },
+      );
+      expect(exitCode, 0, reason: 'stderr: ${stderrLines.join('\n')}');
+      await stderrSub.cancel();
+    },
+  );
 }

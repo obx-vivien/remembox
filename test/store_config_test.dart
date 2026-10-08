@@ -27,10 +27,12 @@ Map<String, String> _env({
   String? storeMode,
   String? syncUrl,
   String? exclusive,
+  String? registryMode,
 }) => {
   'OBX_MEMORY_STORE_MODE': ?storeMode,
   'OBX_MEMORY_SYNC_URL': ?syncUrl,
   'OBX_MEMORY_EXCLUSIVE': ?exclusive,
+  'OBX_MEMORY_REGISTRY_MODE': ?registryMode,
 };
 
 void main() {
@@ -250,6 +252,85 @@ void main() {
       expect(
         () => MemoryConfig.fromEnvironment(env: _env(storeMode: 'bogus')),
         throwsA(isA<ArgumentError>()),
+      );
+    });
+  });
+
+  group('MemoryConfig.fromEnvironment: OBX_MEMORY_REGISTRY_MODE', () {
+    test('unset means open, not explicit', () {
+      final config = MemoryConfig.fromEnvironment(env: _env());
+      expect(config.registryMode, RegistryMode.open);
+      expect(config.registryModeExplicit, isFalse);
+    });
+
+    test('an empty value means open, not explicit', () {
+      final config = MemoryConfig.fromEnvironment(env: _env(registryMode: ''));
+      expect(config.registryMode, RegistryMode.open);
+      expect(config.registryModeExplicit, isFalse);
+    });
+
+    test('"strict" is parsed and explicit', () {
+      final config = MemoryConfig.fromEnvironment(
+        env: _env(registryMode: 'strict'),
+      );
+      expect(config.registryMode, RegistryMode.strict);
+      expect(config.registryModeExplicit, isTrue);
+    });
+
+    test('" STRICT " is trimmed and lowercased', () {
+      final config = MemoryConfig.fromEnvironment(
+        env: _env(registryMode: ' STRICT '),
+      );
+      expect(config.registryMode, RegistryMode.strict);
+      expect(config.registryModeExplicit, isTrue);
+    });
+
+    test('an explicit "open" is open and explicit', () {
+      final config = MemoryConfig.fromEnvironment(
+        env: _env(registryMode: 'open'),
+      );
+      expect(config.registryMode, RegistryMode.open);
+      expect(config.registryModeExplicit, isTrue);
+    });
+
+    test('an unknown value throws ArgumentError naming the variable and '
+        'the value (never silently open)', () {
+      expect(
+        () => MemoryConfig.fromEnvironment(env: _env(registryMode: 'bogus')),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('OBX_MEMORY_REGISTRY_MODE'), contains('"bogus"')),
+          ),
+        ),
+      );
+    });
+
+    test('startup line names mode and source', () {
+      expect(
+        MemoryConfig.fromEnvironment(env: _env()).registryModeStartupLine(),
+        '[startup] registry mode: open (default) – a new project name is '
+        'registered on first write (logged), a new tag is simply created; '
+        'nothing is rejected, warnings only for near-duplicates and merged '
+        'project names',
+      );
+      expect(
+        MemoryConfig.fromEnvironment(
+          env: _env(registryMode: 'open'),
+        ).registryModeStartupLine(),
+        '[startup] registry mode: open (OBX_MEMORY_REGISTRY_MODE set '
+        'explicitly) – a new project name is registered on first write '
+        '(logged), a new tag is simply created; nothing is rejected, '
+        'warnings only for near-duplicates and merged project names',
+      );
+      expect(
+        MemoryConfig.fromEnvironment(
+          env: _env(registryMode: 'strict'),
+        ).registryModeStartupLine(),
+        '[startup] registry mode: strict (OBX_MEMORY_REGISTRY_MODE) – '
+        'writes with an unregistered project or tag are rejected; register '
+        'with project_set / tag_define first',
       );
     });
   });

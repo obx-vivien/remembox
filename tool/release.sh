@@ -25,10 +25,14 @@
 #      calling tool/setup.sh (dylib download + codegen) and tool/build.sh
 #      (exe + launcher) — never by copying the worktree's dylib.
 #   5. Assemble the release ZIP layout: top-level remembox/ containing
-#      dist/, skill/SKILL.md, LICENSE, README.md.
+#      dist/, skill/SKILL.md, templates/ (cockpit, Instructions for Claude
+#      block, global-CLAUDE.md – the setup a user copies), LICENSE,
+#      README.md.
 #   5b. Personal-trace gate, final pass: re-scan the fully assembled tree,
-#      now including dist/'s compiled binaries, skill/SKILL.md, LICENSE
-#      and README.md — none of which existed yet for step 3's pass. Scans
+#      now including dist/'s compiled binaries, skill/SKILL.md, templates/,
+#      LICENSE and README.md – dist/ did not exist yet for step 3's pass
+#      (templates/ is covered by both passes: step 3 scans the whole
+#      archived tree, step 5b the whole assembled one). Scans
 #      binary content via raw byte grep, not `strings` (see the comment on
 #      run_trace_gate below for why), so this subsumes what used to be a
 #      separate binary-strings gate.
@@ -218,8 +222,16 @@ run_trace_gate() {
 
 if [ "${RELEASE_GATE_LIB_ONLY:-}" = "1" ]; then
   # Test harnesses source this script with RELEASE_GATE_LIB_ONLY=1 to get
-  # the two functions above without running a real release.
-  return 0 2>/dev/null || exit 0
+  # the two functions above without running a real release. Honoured only
+  # when SOURCED: executed with the variable set, the script must not look
+  # like a successful release run – it fails loudly instead.
+  if (return 0 2>/dev/null); then
+    return 0
+  fi
+  echo "ERROR: RELEASE_GATE_LIB_ONLY=1 is a test hook for sourcing this" >&2
+  echo "       script; it must not be set when running a release. Unset it" >&2
+  echo "       and re-run – nothing was built or released." >&2
+  exit 1
 fi
 
 cd "$(dirname "$0")/.."
@@ -373,6 +385,8 @@ echo "==> Built: $STAGE/dist (lib: $(basename "$LIB_BUILT"))"
 # remembox/
 #   dist/          <- launcher + bin/remembox + lib/libobjectbox.dylib
 #   skill/SKILL.md
+#   templates/     <- cockpit.md, instructions-for-claude.md,
+#                     global-CLAUDE.md (setup files the user copies)
 #   LICENSE
 #   README.md
 echo "==> Assembling release layout"
@@ -410,6 +424,16 @@ if [ ! -f "$STAGE/README.md" ]; then
 fi
 # Same mode normalisation as skill/SKILL.md above, for good measure.
 chmod 644 "$STAGE/README.md" "$STAGE/$LICENSE_FILE"
+# The setup templates arrive via the git archive like README.md; a release
+# never ships silently without them (README and the usage guide point
+# users there).
+for template in cockpit.md instructions-for-claude.md global-CLAUDE.md; do
+  if [ ! -f "$STAGE/templates/$template" ]; then
+    echo "ERROR: templates/$template missing from the archived tree" >&2
+    exit 1
+  fi
+done
+find "$STAGE/templates" -type f -exec chmod 644 {} +
 
 # Everything not part of the shipped layout stays out of the zip: remove
 # the rest of the archived tree (source, tests, tool/, docs/, pubspec*,
@@ -417,7 +441,7 @@ chmod 644 "$STAGE/README.md" "$STAGE/$LICENSE_FILE"
 # / build_runner in step 4) now that dist/ has been produced from it. Keep
 # only what step 6 lists. dotglob is required — bare `*` does not match
 # dotfiles/dotdirs in bash, which would otherwise ship .dart_tool etc.
-KEEP_ITEMS="dist skill $LICENSE_FILE README.md"
+KEEP_ITEMS="dist skill templates $LICENSE_FILE README.md"
 shopt -s dotglob
 for entry in "$STAGE"/*; do
   name="$(basename "$entry")"
@@ -432,9 +456,9 @@ echo "==> Release contents:"
 ls -la "$STAGE" | sed 's/^/    /'
 
 # --- 5b. Personal-trace gate, final pass ------------------------------------
-# Re-scan now that skill/SKILL.md, LICENSE, README.md and dist/ (including
-# the compiled binaries) are all in place — step 3's pass ran before any
-# of those existed, so none of them were ever scanned before this fix.
+# Re-scan now that skill/SKILL.md, templates/, LICENSE, README.md and
+# dist/ (including the compiled binaries) are all in place – step 3's pass
+# ran before dist/ existed, and before the release layout was assembled.
 # "full" mode covers binary content too, so this subsumes what used to be
 # a separate binary-strings gate (see run_trace_gate's comment for why
 # `strings` cannot be used for that).

@@ -569,9 +569,11 @@ void main() {
 
       final r = await service.tagsList();
       final list = (r['tags'] as List).cast<Map<String, Object?>>();
+      // `registered`/`description` (tag registry, 2026-10-06) are part
+      // of every row; nothing is registered here.
       expect(list, [
-        {'name': 'alice', 'count': 2},
-        {'name': 'bob', 'count': 1},
+        {'name': 'alice', 'count': 2, 'registered': false, 'description': null},
+        {'name': 'bob', 'count': 1, 'registered': false, 'description': null},
       ]);
       expect(r['_provenance_note'], isNotNull);
     });
@@ -1649,5 +1651,88 @@ void main() {
       expect(after.contentHash, beforeHash);
       expect(index().count(), beforeIndexCount);
     });
+  });
+
+  // Pinned BEFORE the redundancy check in `_prepareTags` (steps 2/2b) was
+  // extracted into a shared classifier for the strict registry mode: every
+  // warning text, its order, the stored tag list and the log line must
+  // stay byte-identical across that refactor (open mode must not change).
+  group('_prepareTags warning snapshot', () {
+    test(
+      'every warning branch produces exactly today\'s text, in order',
+      () async {
+        await service.remember(
+          text: 'contact seed for the snapshot',
+          project: 'garden',
+          tags: ['contact'],
+        );
+        await service.areaSet(name: 'work');
+        await service.projectSet(name: 'acme-app', addAreas: ['work']);
+        logLines.clear();
+
+        final r = await service.remember(
+          text: 'snapshot probe for every tag warning branch',
+          project: 'acme-app',
+          tags: [
+            'bad\u0007tag',
+            '---',
+            'Apps Script',
+            'apps-script',
+            'acmeApp',
+            'Decision',
+            'Work',
+            'acmeApps',
+            'episodes',
+            'works',
+            'contacts',
+            't42',
+          ],
+        );
+
+        const expected = [
+          'Tag "badtag" dropped: contains control characters.',
+          'Tag "---" dropped: empty after normalization.',
+          'Tag "Apps Script" stored as "appsScript".',
+          'Tag "apps-script" stored as "appsScript".',
+          'Tag "apps-script" is a duplicate of "Apps Script" (both '
+              'normalize to "appsScript") – kept once.',
+          'Tag "Decision" stored as "decision".',
+          'Tag "Work" stored as "work".',
+          'Tag "acmeApp" dropped: matches the project name "acme-app" – '
+              'project is already filterable.',
+          'Tag "decision" dropped: matches a memory kind ("decision") – '
+              'kind is already filterable.',
+          'Tag "work" dropped: matches an area this project belongs to – '
+              'area is already filterable.',
+          'Tag "acmeApps" looks like a near-duplicate of the project name '
+              '"acme-app" – kept, but consider the project filter instead '
+              'of a tag.',
+          'Tag "episodes" looks like a near-duplicate of the kind '
+              '"episode" – kept, but consider the kind filter instead of a '
+              'tag.',
+          'Tag "works" looks like a near-duplicate of an area this project '
+              'belongs to – kept, but consider the area filter instead of a '
+              'tag.',
+          'New tag "contacts" – did you mean the existing "contact"?',
+          '6 tags on one entry – more than 5 rarely help grouping.',
+          'Tag "t42" looks like an identifier or version – identifiers and '
+              'versions belong in the text, not in tags.',
+        ];
+        expect(warningOf(r), expected.join(' '));
+        expect(tagNamesOf(r), [
+          'acmeApps',
+          'appsScript',
+          'contacts',
+          'episodes',
+          't42',
+          'works',
+        ]);
+        final id = r['id'] as int;
+        expect(
+          logLines,
+          contains('[memory] entry $id tag preparation: ${expected.join(' | ')}'),
+        );
+      },
+    );
   });
 }

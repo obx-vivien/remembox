@@ -4,7 +4,7 @@ description: >-
   backed by ObjectBox with HNSW vector search. Pure Dart; stdio transport
   (one process per client) and a streamable-HTTP singleton daemon transport
   (one process, many concurrent sessions).
-version: 0.3.1
+version: 0.4.0
 publish_to: none
 
 environment:
@@ -14,6 +14,7 @@ dependencies:
   crypto: ^3.0.0
   dart_mcp: ^0.5.2
   http: ^1.2.0
+  meta: ^1.16.0
   objectbox: ^5.3.2
   path: ^1.9.0
   # Used by lib/src/http_transport.dart (2026-07-18, HTTP daemon mode) to

@@ -69,6 +69,40 @@ that attaches tags (`remember` directly, `supersede` indirectly via
 `remember`) goes through it. Do not duplicate any part of its rules
 (camelCase normalization, redundancy against project/kind/area, near-
 duplicate detection, identifier/version warnings) at another call site.
+The redundancy matching itself lives in `_TagRedundancyContext`, shared
+with `tag_define` – reuse it rather than re-deriving project/kind/area
+maps.
+
+`_prepareTags` also carries the strict registry mode's tag check
+(`OBX_MEMORY_REGISTRY_MODE=strict`): after the redundancy step, a tag
+without a `TagDefinition` row makes it THROW a `ValidationException`
+(open mode never throws there). `remember` therefore calls it inside its
+write transaction BEFORE the dedup lookup and before anything is written;
+keep it there. The project counterpart is `_requireWritableProject`
+(`memory_service_registry.dart`), called in every project-writing
+transaction before anything is written. Open mode must stay
+byte-identical on every write path – `test/open_mode_golden_test.dart`
+(compared with output captured from main's code, see that file for how
+to re-capture) and `test/tags_test.dart`'s warning snapshot pin that.
+
+Tag aliases (`TagAlias`) are resolved in `_prepareTags` too – after
+normalization, before the redundancy and strict steps, in both modes,
+and only when any alias exists (so stores without aliases take the old
+path). The only other place is `_resolveAliasTarget`, used for
+`tag_merge`/`tags_normalize` targets so a merge never writes an alias
+name as a tag; do not resolve aliases anywhere else. Only aliases of a
+REGISTERED tag resolve. `tag_define`/`tag_merge` manage them, and
+`_aliasConflict` is the one rule for what may become an alias.
+
+## Setup templates (`templates/`)
+
+`templates/` is user-facing and ships in the release ZIP: everything in
+it must stay invented, synthetic and generic – no real person, family,
+company, city or institution – and English only. `templates/global-CLAUDE.md`
+is a template for a user's `~/.claude/CLAUDE.md`, not instructions for
+working on this repository. `test/templates_test.dart` keeps the short
+paste block identical across README, usage guide, the English quickstart
+and the template.
 
 ## Dev-log citations in comments
 

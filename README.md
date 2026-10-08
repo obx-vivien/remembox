@@ -61,7 +61,7 @@ A really useful assistant needs to answer three different questions, and they be
 |---|---|---|---|
 | **Now** | What is going on right now? | A small local `cockpit.md` | Active projects, a move, an insurance claim, deadlines, next actions |
 | **Memory** | What should the assistant know and remember over time? | RememBox | Addresses, bank details, family and health context, goals, preferences, decisions, previous attempts |
-| **Rules** | How should the assistant work with me? | `CLAUDE.md` in Claude Code; the Instructions for Claude field in Desktop, Cowork, web and mobile; a skill for the long form | Recall before answering, keep memory current, maintain the cockpit, supersede outdated facts |
+| **Rules** | How should the assistant work with me? | `CLAUDE.md` in Claude Code; the Instructions for Claude field in Desktop, Cowork, web and mobile; a skill as the detailed tool guide | Recall before answering, keep memory current, maintain the cockpit, supersede outdated facts |
 
 One rule cuts across all three: **sensitive personal values belong in RememBox, not in `CLAUDE.md`, skills or other standing prompt files.** Those describe *how to work*; the private values stay in the local memory layer.
 
@@ -188,10 +188,18 @@ RememBox only works reliably if the assistant gets its usage rules at the start 
 - **Claude Code:** `~/.claude/CLAUDE.md` as well – Claude Code reads this file at the start of every session; the other clients do not read it.
 
 ```text
-Memory (RememBox): Before any non-trivial task, call recall first; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Before using a new project name, call areas_list and pick an existing one. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry, check tags_list first; never use a project name, an area name or an identifier as a tag. Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember). Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
 ```
 
-Replace the project list with your own, keep the block short (it is loaded into every chat), and keep both places in sync when the list changes. Changes reliably apply to new sessions – start a new chat after editing. Why and how: [usage guide, section 6](docs/usage-guide.md#6-making-the-rules-load-every-time).
+Ready-to-copy versions of the whole setup ship in `templates/` – in this repository and in the release ZIP:
+
+| File | Where it goes | Which client reads it |
+|---|---|---|
+| `templates/instructions-for-claude.md` | the block above for the Instructions for Claude field | Desktop, Cowork, web, mobile – always |
+| `templates/global-CLAUDE.md` | `~/.claude/CLAUDE.md` – the block above at the top, the long-form rules below it | Claude Code – at every session start |
+| `templates/cockpit.md` | your own `cockpit.md` (anywhere you like) – the "Now" layer, a fictional example to adapt; replace `cockpit.md` in the block with its full path | clients with local file access (Claude Code, Cowork) read it at session start because the block tells them to; the web and mobile apps cannot |
+
+Replace the project list with your own, keep the block short (it is loaded into every chat), and keep both places in sync when the list changes. The cockpit file is the "Now" layer described above – drop the first sentence if you don't keep one. To have the server enforce the register instead of only asking for it, see strict registry mode in the [usage guide](docs/usage-guide.md#strict-registry-mode). Changes reliably apply to new sessions – start a new chat after editing. Why and how: [usage guide, section 6](docs/usage-guide.md#6-making-the-rules-load-every-time).
 
 ### 5. Test it
 
@@ -228,7 +236,7 @@ Then register `dist/remembox` exactly as in step 3 above.
 
 Installing RememBox gives the AI access to persistent memory.
 
-Making the rules load in every session (step 4 above) is what turns that access into a **memory practice**: the assistant is instructed to recall context proactively and keep the memory current as part of normal work, without waiting for you to say "remember this" every time. The supplied skill adds the long form of those rules.
+Making the rules load in every session (step 4 above) is what turns that access into a **memory practice**: the assistant is instructed to recall context proactively and keep the memory current as part of normal work, without waiting for you to say "remember this" every time. The supplied skill adds the detailed tool guide.
 
 The skill ships as `skill/SKILL.md`, both in this repository and inside the release ZIP – there is only one copy to keep current.
 
@@ -255,7 +263,7 @@ The important rules are simple:
 - **Keep sensitive values in RememBox**, not in `CLAUDE.md` or Skills.
 - **Keep rules, current operational state and durable knowledge separate** so each has one clear source of truth.
 
-The [usage guide](docs/usage-guide.md) contains the concrete setup, including the three layers (the Instructions for Claude field, `CLAUDE.md`, skill), the full global `CLAUDE.md` snippet, the cockpit pattern and the session-end routine.
+The [usage guide](docs/usage-guide.md) contains the concrete setup, including the three layers (the Instructions for Claude field, `CLAUDE.md`, skill), the global `CLAUDE.md` rules (the template `templates/global-CLAUDE.md`), the cockpit pattern and the session-end routine.
 
 ---
 
@@ -319,7 +327,7 @@ Every `supersede` also adds a forward link from the old version to the new one.
 
 | Tool | What it does |
 |---|---|
-| `remember` | Store a memory with kind, tags, required `project` and source. Deduplicates; oversized input is rejected rather than truncated. |
+| `remember` | Store a memory with kind, tags, required `project` and source. Deduplicates; oversized input is rejected rather than truncated. The result lists similar entries as `related`; optional `links` create links atomically. |
 | `recall` | Semantic search over memories, filterable by project, kind and source type. Expired and superseded entries are excluded by default. |
 | `get` | Retrieve one memory by ID, including tags, source and links. |
 | `supersede` | Replace a memory with a corrected version while preserving and linking the old one. |
@@ -332,7 +340,8 @@ Every `supersede` also adds a forward link from the old version to the new one.
 | `areas_list` / `project_merge` / `entries_move` | List areas with their projects and registry health; merge one project name into another; move selected entries into a different project (splits a catch-all project). |
 | `fact_set` / `fact_get` / `fact_query` | Set, look up or search an exact structured value (subject + attribute + project), with history. |
 | `fact_forget` | Retract a fact, close it as of a date, or delete it permanently. |
-| `tags_list` / `tag_merge` / `tag_remove` / `tags_normalize` | List tags with live usage counts and variant groups; merge spelling variants into one tag; remove tags; one-shot upgrade helper that normalizes every pre-0.3.0 tag spelling. |
+| `tags_list` / `tag_merge` / `tag_remove` / `tags_normalize` | List tags with live usage counts, variant groups and whether each is registered (with its description); merge spelling variants into one tag; remove tags; one-shot upgrade helper that normalizes every pre-0.3.0 tag spelling. |
+| `tag_define` | Register a tag with a one-sentence description and optional aliases (old spellings, synonyms – e.g. `chores` for `housework`; `aliases` replaces the set, `addAliases`/`removeAliases` change single ones), or update them. A write that uses an alias stores the tag. In strict registry mode only registered tags (and their aliases) can be used. |
 
 ## Project scope
 
@@ -374,6 +383,7 @@ Common variables include:
 - `OBX_MEMORY_DIR` – default `~/.remembox`
 - `OBX_MEMORY_EMBED_MODEL` – default `embeddinggemma`
 - `OBX_MEMORY_SYNC_URL` – unset means local only
+- `OBX_MEMORY_REGISTRY_MODE` – `open` (default): a new project name is registered on first write (logged), a new tag is simply created; nothing is rejected, warnings only for near-duplicates and merged project names. `strict` rejects writes with an unregistered project or tag (register with `project_set` / `tag_define` first)
 
 The full configuration, including daemon caps and ranking weights, is documented in [docs/configuration.md](docs/configuration.md).
 

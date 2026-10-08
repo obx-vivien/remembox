@@ -17,7 +17,7 @@ import 'store.dart' show LogSink, stderrLog, truncateForError;
 
 /// Single naming site (with pubspec.yaml `name:`) — keep in sync on rename.
 const String serverName = 'remembox';
-const String serverVersion = '0.3.1';
+const String serverVersion = '0.4.0';
 
 /// Serializes ALL tool-handler executions across every [RememboxServer]
 /// instance that shares it.
@@ -146,7 +146,13 @@ base class RememboxServer extends MCPServer with ToolsSupport {
             'change over time (amounts, dates, identifiers) instead of '
             'remember/recall. Tags are normalized and checked on write; '
             'use tags_list before inventing a new one, and tag_merge/'
-            'tag_remove to clean up spelling variants.',
+            'tag_remove to clean up spelling variants. Project names and '
+            'tags come from a register: look them up first (areas_list, '
+            'tags_list); register a new one with a one-sentence description '
+            '(project_set, tag_define) before using it. If the server runs '
+            'in strict registry mode (OBX_MEMORY_REGISTRY_MODE=strict), a '
+            'write with an unregistered project or tag is rejected and the '
+            'error says what to do.',
       ) {
     registerTool(
       _rememberTool,
@@ -219,6 +225,11 @@ base class RememboxServer extends MCPServer with ToolsSupport {
     registerTool(
       _tagsNormalizeTool,
       (r) => _serialized('tags_normalize', () => _tagsNormalize(r)),
+    );
+    // 2026-10-06, tag registry (strict registry mode).
+    registerTool(
+      _tagDefineTool,
+      (r) => _serialized('tag_define', () => _tagDefine(r)),
     );
     // 2026-09-21, entries move (0.3.0).
     registerTool(
@@ -522,6 +533,57 @@ base class RememboxServer extends MCPServer with ToolsSupport {
     throw ValidationException('"$key" must be a boolean.');
   }
 
+  /// `remember`'s `links` argument: a JSON list of `{toId, type, note?}`
+  /// objects. `toId` is validated like every other id argument
+  /// ([_parseNumAsInt]); the type's validity, the list-size cap and target
+  /// existence are enforced by [MemoryService.remember] itself. Unknown keys
+  /// inside an item are rejected (never silently dropped – a misspelled
+  /// `note` would otherwise vanish without a trace).
+  static const _linkItemKeys = {'toId', 'type', 'note'};
+
+  static List<LinkSpec> _optLinkSpecs(CallToolRequest request, String key) {
+    final value = request.arguments?[key];
+    if (value == null) return const [];
+    if (value is! List) {
+      throw ValidationException(
+        '"$key" must be a list of {toId, type, note?} objects.',
+      );
+    }
+    return [for (final item in value) _parseLinkItem(key, item)];
+  }
+
+  static LinkSpec _parseLinkItem(String key, Object? item) {
+    if (item is! Map) {
+      throw ValidationException(
+        'Each "$key" item must be an object {toId, type, note?}.',
+      );
+    }
+    final unknown = item.keys.where((k) => !_linkItemKeys.contains(k)).toList();
+    if (unknown.isNotEmpty) {
+      throw ValidationException(
+        'Unknown field(s) in a "$key" item: '
+        '${unknown.map((k) => '"${truncateForError('$k')}"').join(', ')}. '
+        'Allowed: ${_linkItemKeys.join(', ')}.',
+      );
+    }
+    final toId = item['toId'];
+    final parsedId = toId is num ? _parseNumAsInt('$key.toId', toId) : null;
+    if (parsedId == null || parsedId < 1) {
+      throw ValidationException(
+        'Each "$key" item needs an integer "toId" >= 1.',
+      );
+    }
+    final type = item['type'];
+    if (type is! String) {
+      throw ValidationException('Each "$key" item needs a string "type".');
+    }
+    final note = item['note'];
+    if (note != null && note is! String) {
+      throw ValidationException('"$key" item "note" must be a string.');
+    }
+    return LinkSpec(toId: parsedId, type: type, note: (note as String?) ?? '');
+  }
+
   static List<String> _optStringList(CallToolRequest request, String key) {
     final value = request.arguments?[key];
     if (value == null) return const [];
@@ -631,7 +693,17 @@ base class RememboxServer extends MCPServer with ToolsSupport {
     description:
         'Store a memory. Deduplicates on identical (normalized) '
         'text and returns the existing id with duplicate=true in that case. '
-        'The text is embedded and indexed for semantic recall.',
+        'The text is embedded and indexed for semantic recall. The result '
+        'lists up to ${MemoryService.relatedMax} existing, similar entries '
+        'as `related` (same project first; `relatedMore` counts further '
+        'ones not shown) – read it, and link them with `links` (or the '
+        'link tool). Items marked `likelySameThing` are probably an older '
+        'state of this: use supersede (prose) or fact_set (exact value); `weak` '
+        'ones are only a possible predecessor – check before linking. In '
+        'strict registry mode the project must already be registered '
+        '(project_set) and every tag defined (tag_define); otherwise the '
+        'call is rejected, nothing is written, and the error says what to '
+        'do.',
     inputSchema: Schema.object(
       properties: {
         'text': Schema.string(description: 'The memory text to store.'),
@@ -698,6 +770,29 @@ base class RememboxServer extends MCPServer with ToolsSupport {
               'SHA-256 of the document content for dedup '
               '(derived from name+path if omitted).',
         ),
+        'links': Schema.list(
+          description:
+              'Links from the NEW entry to existing ones, created in the '
+              'same transaction as the entry (all-or-nothing: an unknown '
+              'toId or type rejects the whole call and nothing is '
+              'written). At most ${MemoryService.maxLinksPerRemember}. '
+              'Each item: toId (existing entry id), type (one of '
+              '${LinkType.all.join(', ')}), optional note. Not applied if '
+              'the text is a duplicate of an existing entry (the result '
+              'warns). Created links are listed in the result.',
+          items: Schema.object(
+            properties: {
+              'toId': Schema.num(
+                description: 'Existing target entry id, integer.',
+              ),
+              'type': Schema.string(
+                description: 'One of: ${LinkType.all.join(', ')}.',
+              ),
+              'note': Schema.string(description: 'Optional note on the edge.'),
+            },
+            required: ['toId', 'type'],
+          ),
+        ),
       },
       // 'project' is deliberately NOT in this list even though it is
       // required (see its Schema.string description above): this repo's
@@ -736,6 +831,7 @@ base class RememboxServer extends MCPServer with ToolsSupport {
           docMimeType: _optString(request, 'docMimeType'),
           docCreatedAt: _optDate(request, 'docCreatedAt'),
           docContentHash: _optString(request, 'docContentHash'),
+          links: _optLinkSpecs(request, 'links'),
         );
       });
 
@@ -831,7 +927,11 @@ base class RememboxServer extends MCPServer with ToolsSupport {
     description:
         'Replace a memory with a corrected version. The old entry '
         'is kept and linked forward (supersededBy) — corrections never '
-        'silently delete history.',
+        'silently delete history. Like remember, the result lists '
+        'similar entries as `related`. In strict registry mode the project '
+        '(also an inherited one) must be registered and not merged, and '
+        'every tag defined; otherwise nothing is written and the error '
+        'says what to do.',
     inputSchema: Schema.object(
       properties: {
         'oldId': Schema.num(
@@ -896,7 +996,10 @@ base class RememboxServer extends MCPServer with ToolsSupport {
     description:
         'Create a typed link between two memories '
         '(${LinkType.all.join(', ')}). Duplicate links are detected and '
-        'returned instead of re-created.',
+        'returned instead of re-created. Link whenever an entry concerns '
+        'another one – the same person, case or object, a follow-up, a '
+        'contradiction – so the thread can be found later; remember and '
+        'supersede suggest candidates as `related`.',
     inputSchema: Schema.object(
       properties: {
         'fromId': Schema.num(description: 'Source entry id, integer.'),
@@ -1050,7 +1153,11 @@ base class RememboxServer extends MCPServer with ToolsSupport {
         'lifecycle status (active/archived – never "merged", that is set '
         'only by project_merge), and area membership. addAreas/'
         'removeAreas take area names that must already exist (area_set '
-        'first) – project_set never auto-creates an area.',
+        'first) – project_set never auto-creates an area. Register a new '
+        'project here with a one-sentence description before writing to '
+        'it. In strict registry mode creating a project requires the '
+        'description, and a name that differs from a registered one only '
+        'by case/space/-/_ is rejected unless allowSimilar is true.',
     inputSchema: Schema.object(
       properties: {
         'name': Schema.string(description: 'Project name, exact match.'),
@@ -1069,6 +1176,12 @@ base class RememboxServer extends MCPServer with ToolsSupport {
           description:
               'One of: ${ProjectStatus.active}, ${ProjectStatus.archived}.',
         ),
+        'allowSimilar': Schema.bool(
+          description:
+              'Strict registry mode: register a new name even though it '
+              'differs from a registered one only by case/space/-/_ '
+              '(default false).',
+        ),
       },
       required: ['name'],
     ),
@@ -1082,6 +1195,7 @@ base class RememboxServer extends MCPServer with ToolsSupport {
       addAreas: _optStringList(request, 'addAreas'),
       removeAreas: _optStringList(request, 'removeAreas'),
       status: _optString(request, 'status'),
+      allowSimilar: _optBool(request, 'allowSimilar'),
     ),
   );
 
@@ -1092,7 +1206,10 @@ base class RememboxServer extends MCPServer with ToolsSupport {
         'count), plus registry-health info: projects with no area '
         'assigned, project names used on entries/facts but never '
         'registered, and area-membership rows pointing at a since-deleted '
-        'area or project.',
+        'area or project. Also the project register: projects (every '
+        'registered, non-merged project with status, description and '
+        'areas), mergedProjects (old names and where they went) and '
+        'registryMode – look a project name up here before writing.',
     inputSchema: Schema.object(properties: {}),
   );
 
@@ -1144,7 +1261,9 @@ base class RememboxServer extends MCPServer with ToolsSupport {
         'total (requested ids plus every chain-added id) is capped at '
         '${MemoryService.entriesMoveMaxTotalIds}. Facts are never touched '
         '(they belong to projects explicitly, via fact_set). dryRun=true '
-        'reports the planned change without writing.',
+        'reports the planned change without writing. In strict registry '
+        'mode toProject must already be registered (project_set) and not '
+        'merged.',
     inputSchema: Schema.object(
       properties: {
         'ids': Schema.list(
@@ -1194,7 +1313,9 @@ base class RememboxServer extends MCPServer with ToolsSupport {
         'keeps the old one current until then; a new value while a '
         'scheduled future row exists either supersedes it (if its own '
         'validFrom is at or after the scheduled one) or is rejected as '
-        'back-dated.',
+        'back-dated. In strict registry mode the project must already be '
+        'registered (project_set); otherwise nothing is written and the '
+        'error says what to do.',
     inputSchema: Schema.object(
       properties: {
         'subject': Schema.string(
@@ -1398,7 +1519,13 @@ base class RememboxServer extends MCPServer with ToolsSupport {
         'returns variantGroups (existing tags that look like spelling '
         'variants of each other – candidates for tag_merge) and an unused '
         'count (tags with zero live usage – candidates for tag_remove). '
-        'Check this before inventing a new tag.',
+        'Every row says whether the tag is registered (tag_define) and '
+        'carries its description; registered tags not used yet are listed '
+        'with count 0. Also returns registryMode, registered (number of '
+        'registered tags) and unregisteredInUse. Registered tags carry '
+        'their aliases (alternative names), an alias in use is marked '
+        'aliasOf, and a prefix also matches aliases. Check this before '
+        'inventing a new tag.',
     inputSchema: Schema.object(
       properties: {
         'prefix': Schema.string(
@@ -1437,7 +1564,9 @@ base class RememboxServer extends MCPServer with ToolsSupport {
         'writing. Idempotent – safe to re-run. Main use: "from" holding one '
         'or more OLD spellings of "into", e.g. after upgrading from an '
         'older version – from: ["apps-script", "AppsScript"], into: '
-        '"appsScript".',
+        '"appsScript". When "into" is a registered tag, the merged-away '
+        'names become its aliases, so later writes using them resolve to '
+        '"into".',
     inputSchema: Schema.object(
       properties: {
         'from': Schema.list(
@@ -1511,5 +1640,89 @@ base class RememboxServer extends MCPServer with ToolsSupport {
   FutureOr<CallToolResult> _tagsNormalize(CallToolRequest request) => _guard(
     'tags_normalize',
     () => service.tagsNormalize(dryRun: _optBool(request, 'dryRun')),
+  );
+
+  // 2026-10-06, tag registry (strict registry mode).
+  static final _tagDefineTool = Tool(
+    name: 'tag_define',
+    description:
+        'Register a tag with a one-sentence description (or update the '
+        'description of a registered one). Look it up with tags_list '
+        'first and reuse an existing tag where one fits. The name is '
+        'normalized like a tag on remember (e.g. "apps-script" registers '
+        '"appsScript"). Rejected: a name that repeats a registered '
+        'project, a memory kind or an area, and – unless allowSimilar is '
+        'true – a name that differs from a registered tag only by case, '
+        'plural or separators. In strict registry mode remember/supersede '
+        'accept only registered tags. aliases records alternative names '
+        '(old spellings, synonyms): a write using one stores this tag, with '
+        'a warning – in both modes. aliases replaces the whole set; '
+        'addAliases/removeAliases change single ones.',
+    inputSchema: Schema.object(
+      properties: {
+        'name': Schema.string(
+          description:
+              'Tag name, camelCase (normalized on write) – up to '
+              '${MemoryService.tagMaxLen} characters.',
+        ),
+        'description': Schema.string(
+          description:
+              'One sentence: what the tag marks. Required to register a '
+              'new tag; optional when updating.',
+        ),
+        'allowSimilar': Schema.bool(
+          description:
+              'Register even though a registered tag differs only by case, '
+              'plural or separators (default false).',
+        ),
+        'aliases': Schema.list(
+          description:
+              'Alternative names – old spellings, synonyms, other '
+              'languages (e.g. "chores" for "housework"). A write using an '
+              'alias stores this tag instead. REPLACES the current aliases '
+              '(an empty list removes them all, including those tag_merge '
+              'recorded); omit to leave them unchanged. To change single '
+              'aliases use addAliases/removeAliases instead (not together '
+              'with aliases). An alias must not be another registered tag, '
+              'an alias of another tag, a project/area/kind name, or – '
+              'unless allowSimilar – a spelling variant of another tag or '
+              'alias.',
+          items: Schema.string(),
+        ),
+        'addAliases': Schema.list(
+          description:
+              'Aliases to add, keeping the existing ones (same rules as '
+              'aliases).',
+          items: Schema.string(),
+        ),
+        'removeAliases': Schema.list(
+          description: 'Aliases to remove, keeping the others.',
+          items: Schema.string(),
+        ),
+      },
+      required: ['name'],
+      // Unknown keys are rejected rather than ignored: a misspelled
+      // "descripton" would otherwise register nothing and say nothing.
+      additionalProperties: false,
+    ),
+  );
+
+  FutureOr<CallToolResult> _tagDefine(CallToolRequest request) => _guard(
+    'tag_define',
+    () => service.tagDefine(
+      name: _requiredString(request, 'name'),
+      description: _optString(request, 'description'),
+      allowSimilar: _optBool(request, 'allowSimilar'),
+      // null (absent) leaves the aliases unchanged; [] clears them.
+      aliases: request.arguments?['aliases'] == null
+          ? null
+          : _optStringList(request, 'aliases'),
+      addAliases: request.arguments?['addAliases'] == null
+          ? null
+          : _optStringList(request, 'addAliases'),
+      removeAliases: request.arguments?['removeAliases'] == null
+          ? null
+          : _optStringList(request, 'removeAliases'),
+    ),
   );
 }

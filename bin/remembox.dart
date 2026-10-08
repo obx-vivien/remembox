@@ -72,6 +72,12 @@ Future<void> main(List<String> args) async {
       'store.lock',
     );
   }
+  // Registry mode (OBX_MEMORY_REGISTRY_MODE): logged next to the store
+  // mode, for the same reason – the operator can see which rule this
+  // process enforces and whether it was asked for. An invalid value has
+  // already failed MemoryConfig.fromEnvironment above, before any store
+  // work.
+  log(config.registryModeStartupLine());
 
   // 2026-09-09 (store mode derived from configuration; gated is the
   // default): a Dart process cannot set its own environment before the
@@ -192,6 +198,7 @@ Future<void> main(List<String> args) async {
     log: log,
     maxTextChars: config.maxTextChars,
     guard: guard,
+    registryMode: config.registryMode,
   );
   // 2026-09-01 (Store-Gate, plan §5/WP5): the index watcher needs a live
   // Store reference for its entityChanges subscription across the whole

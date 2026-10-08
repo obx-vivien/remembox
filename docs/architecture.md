@@ -14,6 +14,8 @@ Claude ◄───────────────────────�
                        Embedder │       │          │ @Sync  ProjectScope, Area
                      (Ollama /api/embed)│          │ @Sync  AreaMembership (name-keyed link)
                                         │          │ @Sync  Fact ─ToOne→ MemoryEntry (explainedBy)
+                                        │          │ @Sync  TagDefinition (name-keyed, no relation)
+                                        │          │ @Sync  TagAlias (alias -> tag name, no relation)
                                         │          │ ─────────────────────────
                                         └────────► │ local  MemoryIndex        │
                                                    │        (HNSW 768, cosine) │
@@ -100,6 +102,39 @@ therefore enforced by the write path (query-first inside one write
 transaction), not by the schema; concurrent cross-device `fact_set` calls
 on the same key can transiently produce two current rows, which the write
 path detects and repairs explicitly, never silently.
+
+## Tag registry and strict registry mode
+
+`TagDefinition` (one row per registered tag name, with a description)
+was added after 0.3.1, again additive-only – every earlier entity is
+byte-identical (pinned by `test/model_compat_test.dart` against the frozen
+0.3.1 model). Like `AreaMembership` it is keyed by name and has no
+relation to `Tag`: a cross-device replace on a unique name mints a new
+local id, which would leave a `ToOne` dangling. It stores no derived loose
+key (unlike `ProjectScope.nameKey`), because the tag loose key has changed
+more than once; the registry is small enough to page through.
+
+`TagAlias` (one row per alternative name of a registered tag: `name`
+unique, `tag` the canonical `TagDefinition.name`) ships with it and
+follows the same rules – name-keyed, no relation. `_prepareTags`
+resolves an alias to its tag on every write, in both modes, before the
+redundancy and strict steps; it only looks when any alias exists.
+Projects have no alias entity: a merged `ProjectScope` tombstone already
+plays that role.
+
+`OBX_MEMORY_REGISTRY_MODE` (per process, not stored) decides what the
+write paths do with names that are not registered. `open` (default)
+registers a new project name on first write (logged) and simply creates a
+new tag; nothing is rejected, warnings only for near-duplicates and
+merged project names. `strict` rejects the write instead: the project must
+have a `ProjectScope` row that is not a `merged` tombstone (checked by
+`_requireWritableProject`), and every tag that survives `_prepareTags`'
+redundancy step must have a `TagDefinition` row. Both checks run inside
+the caller's write transaction, before anything is put, embedded or
+logged as written, so a rejection leaves nothing behind and cannot race
+the write. Read tools behave the same in both modes; `reindex` still
+registers every project name already in use, which is the migration path
+into strict mode.
 
 ## Ranking
 

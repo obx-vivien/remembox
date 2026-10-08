@@ -34,9 +34,10 @@ abstract final class _Flag {
 }
 
 /// The seven `@Unique` String properties switched from a hash index to a
-/// value index by the 0.3.1 fix – kept in sync with lib/src/model.dart by
-/// hand; the second test below fails loudly if this list and the model
-/// ever drift apart.
+/// value index by the 0.3.1 fix, plus `TagDefinition.name` and
+/// `TagAlias.name` (added later with the same annotation from the start)
+/// – kept in sync with lib/src/model.dart by hand; the second test below
+/// fails loudly if this list and the model ever drift apart.
 const _valueIndexedUniqueProperties = {
   'MemoryEntry.contentHash',
   'MemoryIndex.sourceKey',
@@ -45,6 +46,8 @@ const _valueIndexedUniqueProperties = {
   'Area.name',
   'AreaMembership.key',
   'ProjectScope.name',
+  'TagDefinition.name',
+  'TagAlias.name',
 };
 
 void main() {
@@ -83,7 +86,7 @@ void main() {
       }
     });
 
-    test('the seven known unique string properties are value-indexed', () {
+    test('the nine known unique string properties are value-indexed', () {
       final seen = <String>{};
       for (final entity in entities) {
         final entityName = entity['name'] as String;
@@ -110,7 +113,7 @@ void main() {
         seen,
         _valueIndexedUniqueProperties,
         reason:
-            'expected to find exactly these seven properties in the model '
+            'expected to find exactly these nine properties in the model '
             '– update this list and lib/src/model.dart together if the '
             'schema changes',
       );

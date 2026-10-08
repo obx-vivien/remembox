@@ -146,21 +146,311 @@ extension MemoryServiceRegistry on MemoryService {
     return (scope: scope, warnings: const [], created: true);
   }
 
-  /// Read. Registered project names whose [ScopeKey] equals
-  /// `ScopeKey.of(name)` but whose exact name differs from [name] –
-  /// candidates for `project_merge`. Must be called from
-  /// inside an existing lending; opens no session of its own.
-  List<String> _nearDuplicateProjects(String name) {
+  /// Read. Registered project rows (any status) whose [ScopeKey] equals
+  /// `ScopeKey.of(name)` but whose exact name differs from [name] – the
+  /// near-duplicate rows behind [_nearDuplicateProjects] and the strict
+  /// registry mode's suggestions ([_requireWritableProject],
+  /// [projectSet]). Must be called from inside an existing lending; opens
+  /// no session of its own.
+  List<ProjectScope> _nearDuplicateProjectRows(String name) {
     final key = ScopeKey.of(name);
     if (key.isEmpty) return const [];
     final matches = _useQuery(
       _projects.query(ProjectScope_.nameKey.equals(key)),
       (q) => q.find(),
     );
-    return matches
-        .where((p) => p.name != name)
-        .map((p) => p.name)
-        .toList(growable: false);
+    return matches.where((p) => p.name != name).toList(growable: false);
+  }
+
+  /// Read. Registered project names whose [ScopeKey] equals
+  /// `ScopeKey.of(name)` but whose exact name differs from [name] –
+  /// candidates for `project_merge`. Must be called from
+  /// inside an existing lending; opens no session of its own.
+  List<String> _nearDuplicateProjects(String name) =>
+      _nearDuplicateProjectRows(name).map((p) => p.name).toList(growable: false);
+
+  // ---------------------------------------------------------------------
+  // Strict registry mode (OBX_MEMORY_REGISTRY_MODE=strict)
+  // ---------------------------------------------------------------------
+
+  /// Logs one `[registry] strict: rejected <tool> – …` line and throws the
+  /// [ValidationException] with [message] – the single exit for every
+  /// strict-mode rejection, so none of them can skip the log line.
+  Never _rejectStrict(String tool, String message) {
+    log(
+      '[registry] strict: rejected $tool – '
+      '${MemoryService.sanitizeForLog(message)}',
+    );
+    throw ValidationException(message);
+  }
+
+  /// A caller-supplied name, quoted for an error message: control
+  /// characters stripped and the echo bounded (same treatment
+  /// [_requireNoControlChars] gives its echo).
+  static String _quoted(String name) =>
+      '"${MemoryService.sanitizeForLog(MemoryService._truncateForError(name))}"';
+
+  /// Read. Follows a merged [row]'s `mergedInto` chain to the project
+  /// that is current now (`A` merged into `B`, later `B` into `C` → `C`).
+  /// [chain] lists every name from [row] to that target. A chain that
+  /// cannot be resolved – an empty `mergedInto`, a target without a
+  /// registry row, or a cycle – returns `target: null` with [broken]
+  /// saying why, and is logged: the caller must not suggest a name then.
+  ({String? target, List<String> chain, String? broken}) _resolveMergeChain(
+    ProjectScope row,
+  ) {
+    final chain = <String>[row.name];
+    var current = row;
+    // Registry-scale bound on top of the cycle check, so a corrupted chain
+    // can never loop.
+    for (var hops = 0; hops < 64; hops++) {
+      if (current.status != ProjectStatus.merged) {
+        return (target: current.name, chain: chain, broken: null);
+      }
+      final next = current.mergedInto;
+      String? broken;
+      if (next.isEmpty) {
+        broken = '${_quoted(current.name)} is marked as merged but has no '
+            'merge target';
+      } else if (chain.contains(next)) {
+        chain.add(next);
+        broken = 'the merge chain loops back to ${_quoted(next)}';
+      } else {
+        chain.add(next);
+        final nextRow = _useQuery(
+          _projects.query(ProjectScope_.name.equals(next, caseSensitive: true)),
+          (q) => q.findFirst(),
+        );
+        if (nextRow == null) {
+          broken = 'the merge target ${_quoted(next)} has no registry row';
+        } else {
+          current = nextRow;
+          continue;
+        }
+      }
+      log(
+        '[registry] broken merge chain for '
+        '"${MemoryService.sanitizeForLog(row.name)}": '
+        '${MemoryService.sanitizeForLog(broken)} (chain: '
+        '${chain.map(MemoryService.sanitizeForLog).join(' -> ')})',
+      );
+      return (target: null, chain: chain, broken: broken);
+    }
+    log(
+      '[registry] broken merge chain for '
+      '"${MemoryService.sanitizeForLog(row.name)}": longer than 64 hops',
+    );
+    return (target: null, chain: chain, broken: 'the merge chain is too long');
+  }
+
+  /// Near-duplicate rows for a suggestion, sorted by name so the message
+  /// is deterministic: [described] is `"a", "b" (merged into "c") – use
+  /// "d"` (a merged row is resolved to the project that is current now,
+  /// see [_resolveMergeChain], and never offered as a name to use), and
+  /// [use] the distinct names a caller can actually write under – active
+  /// or archived rows plus the resolved targets of merged ones.
+  ({String described, List<String> use}) _describeProjectRows(
+    List<ProjectScope> rows,
+  ) {
+    final sorted = [...rows]..sort((a, b) => a.name.compareTo(b.name));
+    final use = <String>[];
+    final parts = <String>[];
+    for (final p in sorted) {
+      if (p.status != ProjectStatus.merged) {
+        parts.add(_quoted(p.name));
+        if (!use.contains(p.name)) use.add(p.name);
+        continue;
+      }
+      final resolved = _resolveMergeChain(p);
+      final into = p.mergedInto.isEmpty
+          ? 'merged, no merge target'
+          : 'merged into ${_quoted(p.mergedInto)}';
+      if (resolved.target == null) {
+        parts.add('${_quoted(p.name)} ($into – see areas_list)');
+      } else {
+        final target = resolved.target!;
+        parts.add('${_quoted(p.name)} ($into) – use ${_quoted(target)}');
+        if (!use.contains(target)) use.add(target);
+      }
+    }
+    return (described: parts.join(', '), use: use);
+  }
+
+  /// `Use "x".` / `Use one of "x", "y".` for [names], or a pointer to
+  /// areas_list when nothing usable is left.
+  static String _useSentence(List<String> names) {
+    if (names.isEmpty) {
+      return 'Call areas_list to see every registered project.';
+    }
+    if (names.length == 1) return 'Use ${_quoted(names.single)}.';
+    return 'Use one of ${names.map(_quoted).join(', ')}.';
+  }
+
+  /// Strict registry mode: rejects a write under a project name that has
+  /// no [ProjectScope] row, or whose row is a `merged` tombstone. Active
+  /// and archived projects are accepted. A no-op in
+  /// [RegistryMode.open] – open mode keeps registering unknown names on
+  /// write ([_ensureProjectScope]).
+  ///
+  /// MUST run inside the caller's write (or, for a dry run, read)
+  /// transaction and BEFORE anything is put or logged as written, so the
+  /// check and the write see the same snapshot (no check-then-write race)
+  /// and a rejection leaves nothing behind. [tool] names the tool in the
+  /// log line; [inheritedFromEntryId] is set by `supersede` when the
+  /// project was inherited from the old entry, so the message can say so.
+  void _requireWritableProject(
+    String name, {
+    required String tool,
+    int? inheritedFromEntryId,
+  }) {
+    if (registryMode != RegistryMode.strict) return;
+    final row = _useQuery(
+      _projects.query(ProjectScope_.name.equals(name, caseSensitive: true)),
+      (q) => q.findFirst(),
+    );
+    if (row != null && row.status != ProjectStatus.merged) return;
+
+    if (row != null) {
+      // Merged tombstone: the data already moved along the merge chain.
+      final resolved = _resolveMergeChain(row);
+      final target = resolved.target;
+      final passHint = target == null
+          ? ''
+          : ' – pass project: ${_quoted(target)}';
+      final quotedName = inheritedFromEntryId == null
+          ? _quoted(name)
+          : '${_quoted(name)} (inherited from entry $inheritedFromEntryId '
+                'because supersede was called without project$passHint)';
+      if (target == null) {
+        _rejectStrict(
+          tool,
+          'project $quotedName was merged (project_merge) and no longer '
+          'accepts writes in strict registry mode, but ${resolved.broken} – '
+          'call areas_list to find the project to use. Nothing was written.',
+        );
+      }
+      final via = resolved.chain.length > 2
+          ? ' (merge chain: ${resolved.chain.map(_quoted).join(' → ')})'
+          : '';
+      _rejectStrict(
+        tool,
+        'project $quotedName was merged into ${_quoted(row.mergedInto)} '
+        '(project_merge)$via and no longer accepts writes in strict '
+        'registry mode. Use ${_quoted(target)} instead. Nothing was '
+        'written.',
+      );
+    }
+
+    final quotedName = inheritedFromEntryId == null
+        ? _quoted(name)
+        : '${_quoted(name)} (inherited from entry $inheritedFromEntryId '
+              'because supersede was called without project)';
+    final similar = _nearDuplicateProjectRows(name);
+    final described = _describeProjectRows(similar);
+    final suggestion = similar.isEmpty
+        ? 'No registered project has a similar spelling – call areas_list '
+              'to see every registered project.'
+        : 'Registered projects with a similar spelling: '
+              '${described.described}. ${_useSentence(described.use)}';
+    final allowSimilarArg = similar.isEmpty
+        ? ''
+        : ', allowSimilar: true – needed because of the similar names '
+              'above';
+    final entries = _useQuery(
+      _entries.query(MemoryEntry_.project.equals(name, caseSensitive: true)),
+      (q) => q.count(),
+    );
+    final facts = _useQuery(
+      _facts.query(Fact_.project.equals(name, caseSensitive: true)),
+      (q) => q.count(),
+    );
+    final inUse = <String>[
+      if (entries > 0) '$entries entr${entries == 1 ? 'y' : 'ies'}',
+      if (facts > 0) '$facts fact${facts == 1 ? '' : 's'}',
+    ];
+    // Not "run reindex": reindex registers every name in use at once,
+    // spelling variants included and without descriptions – the one-time
+    // migration step before switching to strict mode, not a fix for one
+    // name.
+    final mergeInto = described.use.isEmpty
+        ? '"<an existing project>"'
+        : _quoted(described.use.first);
+    final inUseNote = inUse.isEmpty
+        ? ''
+        : ' It is already used by ${inUse.join(' / ')} but has no registry '
+              'row: if it is the right name, register it with project_set '
+              'as above; if it is a variant of an existing project, move its '
+              'data there with project_merge (from: ${_quoted(name)}, into: '
+              '$mergeInto). '
+              '(reindex registers every name already in use at once – it is '
+              'the one-time migration step before switching to strict mode.)';
+    _rejectStrict(
+      tool,
+      'project $quotedName is not registered (strict registry mode). '
+      '$suggestion If ${_quoted(name)} is genuinely a new project, register '
+      'it first with project_set (name: ${_quoted(name)}, description: '
+      '"<one sentence: what this project is about>"$allowSimilarArg), then '
+      'retry.$inUseNote Nothing was written.',
+    );
+  }
+
+  /// Strict registry mode, `project_set` on a name with no registry row:
+  /// requires a non-blank [description] and rejects a [ScopeKey] variant
+  /// of an existing row unless [allowSimilar]. Returns normally when the
+  /// row already exists (an update needs neither) or the create is
+  /// allowed. Runs inside `projectSet`'s write tx, before
+  /// [_ensureProjectScope] creates (and logs) the row.
+  void _requireStrictProjectCreate(
+    String name, {
+    required String? description,
+    required bool allowSimilar,
+  }) {
+    final exists =
+        _useQuery(
+          _projects.query(
+            ProjectScope_.name.equals(name, caseSensitive: true),
+          ),
+          (q) => q.count(),
+        ) >
+        0;
+    if (exists) return;
+    final similar = _nearDuplicateProjectRows(name);
+    final described = _describeProjectRows(similar);
+    if (description == null || description.trim().isEmpty) {
+      // Mention allowSimilar right away when it will be needed, so the
+      // caller does not fail a second time on the variant check below.
+      final similarNote = similar.isEmpty
+          ? ''
+          : ' Registered projects with a similar spelling: '
+                '${described.described}. ${_useSentence(described.use)} If '
+                '${_quoted(name)} is genuinely a different project, pass a '
+                'description and allowSimilar: true.';
+      _rejectStrict(
+        'project_set',
+        'project_set: ${_quoted(name)} is not registered yet – in strict '
+        'registry mode a new project needs a description (one sentence: '
+        'what this project is about).$similarNote',
+      );
+    }
+    if (similar.isNotEmpty && !allowSimilar) {
+      // _useSentence without its final full stop, continued below.
+      final useSentence = _useSentence(described.use);
+      final useText = useSentence.substring(0, useSentence.length - 1);
+      _rejectStrict(
+        'project_set',
+        'project_set: ${_quoted(name)} looks like a variant of the '
+        'registered project${similar.length == 1 ? '' : 's'} '
+        '${described.described}. $useText, or pass allowSimilar: true if '
+        '${_quoted(name)} is genuinely a different project.',
+      );
+    }
+    if (similar.isNotEmpty) {
+      log(
+        '[registry] strict: project_set registering '
+        '"${MemoryService.sanitizeForLog(name)}" next to the similar '
+        '${described.described} (allowSimilar: true)',
+      );
+    }
   }
 
   /// Read. Area names whose [ScopeKey] equals `ScopeKey.of(name)` but
@@ -436,12 +726,21 @@ extension MemoryServiceRegistry on MemoryService {
   /// tx. Unknown area names in [addAreas]/[removeAreas] are REJECTED
   /// (never auto-created – typo protection). Result:
   /// `{id, name, status, areas, added, removed, action, warning?}`.
+  ///
+  /// Strict registry mode, CREATING a row only (updating an existing row,
+  /// including a merged tombstone, needs neither): a non-blank
+  /// [description] is required, and a name whose [ScopeKey] matches an
+  /// existing row (any status) is rejected unless [allowSimilar] is true –
+  /// strict mode exists to stop spelling variants, so registering one
+  /// takes an explicit decision. Open mode ignores [allowSimilar] and
+  /// keeps the near-duplicate warning.
   Future<Map<String, Object?>> projectSet({
     required String name,
     String? description,
     List<String> addAreas = const [],
     List<String> removeAreas = const [],
     String? status,
+    bool allowSimilar = false,
   }) async {
     final validatedName = _requireRegistryProjectName(name);
     if (description != null) {
@@ -474,6 +773,14 @@ extension MemoryServiceRegistry on MemoryService {
             '${unknownAreas.map((a) => '"${MemoryService.sanitizeForLog(a)}"').join(', ')}. '
             'Create with area_set first – project_set never auto-creates '
             'areas.',
+          );
+        }
+
+        if (registryMode == RegistryMode.strict) {
+          _requireStrictProjectCreate(
+            validatedName,
+            description: description,
+            allowSimilar: allowSimilar,
           );
         }
 

@@ -162,6 +162,91 @@ Map<String, String> _kindByLooseKey() => {
   for (final k in MemoryKind.all) _tagKey(_normalizeTag(k)): k,
 };
 
+/// How a normalized tag repeats a project, kind or area name – the result
+/// of [_TagRedundancyContext.classify]. `exact*` means the normalized
+/// strings are equal (case-insensitively); `near*` means only the loose
+/// [_tagKey] matches.
+enum _TagRedundancy {
+  none,
+  exactProject,
+  exactKind,
+  exactArea,
+  nearProject,
+  nearKind,
+  nearArea,
+}
+
+/// The redundancy check behind [MemoryServiceTags._prepareTags] Step 2/2b
+/// and `tag_define` – ONE classifier, two callers with different
+/// candidate sets: `_prepareTags` passes the entry's own project and the
+/// areas that project belongs to; `tag_define` (no entry, no single
+/// project) passes every registered project and every area. Each caller
+/// formats its own message from the result.
+///
+/// Pure: the lookup maps are built once from the candidate names, then
+/// [classify] runs per tag with no store access.
+class _TagRedundancyContext {
+  final Map<String, String> _projectExact = {};
+  final Map<String, String> _projectLoose = {};
+  final Map<String, String> _kindExact = _kindByNormalizedLower();
+  final Map<String, String> _kindLoose = _kindByLooseKey();
+  final Map<String, String> _areaExact = {};
+  final Map<String, String> _areaLoose = {};
+
+  /// [projects]/[areas] in a deterministic order; when two candidates
+  /// share a key, the later one wins for exact keys and the first one for
+  /// loose keys – the same rule the inline maps of `_prepareTags` used.
+  _TagRedundancyContext({
+    required Iterable<String> projects,
+    required Iterable<String> areas,
+  }) {
+    for (final p in projects) {
+      final normalized = _normalizeTag(p);
+      _projectExact[normalized.toLowerCase()] = p;
+      _projectLoose.putIfAbsent(_tagKey(normalized), () => p);
+    }
+    for (final a in areas) {
+      final normalized = _normalizeTag(a);
+      _areaExact[normalized.toLowerCase()] = a;
+      _areaLoose[_tagKey(normalized)] = a;
+    }
+  }
+
+  /// Classifies an already-normalized tag. Exact matches are checked
+  /// before loose ones, and project before kind before area – the order
+  /// `_prepareTags` Step 2/2b has always used. [matched] is the project,
+  /// kind or area name that matched (null for [_TagRedundancy.none]).
+  ({_TagRedundancy kind, String? matched}) classify(String normalized) {
+    final lower = normalized.toLowerCase();
+    final exactProject = _projectExact[lower];
+    if (exactProject != null) {
+      return (kind: _TagRedundancy.exactProject, matched: exactProject);
+    }
+    final exactKind = _kindExact[lower];
+    if (exactKind != null) {
+      return (kind: _TagRedundancy.exactKind, matched: exactKind);
+    }
+    final exactArea = _areaExact[lower];
+    if (exactArea != null) {
+      return (kind: _TagRedundancy.exactArea, matched: exactArea);
+    }
+    final loose = _tagKey(normalized);
+    final nearProject = _projectLoose[loose];
+    if (nearProject != null) {
+      return (kind: _TagRedundancy.nearProject, matched: nearProject);
+    }
+    final nearKind = _kindLoose[loose];
+    if (nearKind != null) {
+      return (kind: _TagRedundancy.nearKind, matched: nearKind);
+    }
+    final nearArea = _areaLoose[loose];
+    if (nearArea != null) {
+      return (kind: _TagRedundancy.nearArea, matched: nearArea);
+    }
+    return (kind: _TagRedundancy.none, matched: null);
+  }
+}
+
 String _lowerFirst(String s) =>
     s.isEmpty ? s : s[0].toLowerCase() + s.substring(1);
 
@@ -355,10 +440,22 @@ extension MemoryServiceTags on MemoryService {
   /// length, tag count) still throw, but those are checked earlier, in
   /// [MemoryService._requireArgLengths], against the RAW tags, before this
   /// method ever runs.
+  ///
+  /// Strict registry mode (2026-10-06) is the one exception: after the
+  /// redundancy step, every surviving tag must have a [TagDefinition] row
+  /// (exact, case-sensitive, on the NORMALIZED name); otherwise this
+  /// THROWS a [ValidationException] naming each unregistered tag with up
+  /// to three similar registered ones, and logs one `[registry] strict:`
+  /// rejection line naming [tool] (the calling tool). Blank, control-
+  /// character and redundant tags are still dropped with a warning before
+  /// that check, never rejected. The caller runs this before anything is
+  /// written, so a rejection leaves nothing behind. Open mode never
+  /// throws here.
   ({List<String> tags, List<String> warnings}) _prepareTags(
     List<String> raw, {
     required String project,
     required String kind,
+    String tool = 'remember',
   }) {
     final warnings = <String>[];
     if (raw.isEmpty) return (tags: const [], warnings: warnings);
@@ -424,6 +521,50 @@ extension MemoryServiceTags on MemoryService {
       // collapsed, nothing "differed" to warn about (spec).
     }
 
+    // Step 1b (2026-10-06, tag aliases): a tag that is not a registered
+    // tag itself but exactly matches a TagAlias is replaced by the
+    // canonical tag – in both registry modes, with a warning and a log
+    // line, never silently. Only runs when any alias exists, so a store
+    // without aliases takes exactly the path it took before. Duplicates
+    // that the substitution creates collapse to the first occurrence.
+    // Before the redundancy and strict steps, so those judge the tag
+    // that will actually be stored.
+    var resolvedNormalized = survivingNormalized;
+    if (survivingNormalized.isNotEmpty && _tagAliases.count() > 0) {
+      resolvedNormalized = <String>[];
+      for (final normalized in survivingNormalized) {
+        var resolved = normalized;
+        if (!_isRegisteredTag(normalized)) {
+          final alias = _tagAliasFor(normalized);
+          if (alias != null) {
+            final a = MemoryService.sanitizeForLog(normalized);
+            final t = MemoryService.sanitizeForLog(alias.tag);
+            if (_isRegisteredTag(alias.tag)) {
+              resolved = alias.tag;
+              warnings.add('Tag "$a" is an alias of "$t" – stored as "$t".');
+              log('[memory] tag alias resolved: "$a" -> "$t"');
+              firstRawFor.putIfAbsent(resolved, () => firstRawFor[normalized]!);
+            } else {
+              // A dangling alias (its tag's definition is gone, e.g.
+              // removed on another device): never resolve to an
+              // unregistered tag – keep the name and say why.
+              warnings.add(
+                'Tag "$a" is an alias of "$t", but "$t" is not a registered '
+                'tag – kept as "$a".',
+              );
+              log(
+                '[memory] tag alias not resolved: "$a" -> "$t" (target not '
+                'registered)',
+              );
+            }
+          }
+        }
+        if (!resolvedNormalized.contains(resolved)) {
+          resolvedNormalized.add(resolved);
+        }
+      }
+    }
+
     // Step 2: drop tags redundant with project/kind/area – all three are
     // already filterable (recall/list_recent/fact_query), so repeating one
     // as a tag adds noise, not a new axis.
@@ -439,14 +580,14 @@ extension MemoryServiceTags on MemoryService {
     // strip). A tag whose loose key matches but is NOT an exact match is
     // now only WARNED about (Step 2b below), never dropped – the loose key
     // stays a near-duplicate SIGNAL, never a data-dropping decision.
-    final projectNormalizedLower = _normalizeTag(project).toLowerCase();
-    // kind -> its own normalized form, both directions keyed by the
-    // lowercased normalized string so a match also reports WHICH kind
-    // matched (2026-09-21 review3 M2 fix: the old code always named the
-    // entry's own `kind` argument, which is wrong whenever a tag collides
-    // with a DIFFERENT kind than the one this entry was stored under, e.g.
-    // tag "reference" on a kind="fact" entry).
-    final kindByNormalizedLower = _kindByNormalizedLower();
+    //
+    // 2026-10-06, strict registry mode: the matching itself lives in
+    // [_TagRedundancyContext] (shared with `tag_define`); the messages
+    // below are unchanged. Kinds are keyed by their NORMALIZED form, so a
+    // match reports WHICH kind matched (review3 M2 fix: not the entry's own
+    // `kind` argument – tag "reference" on a kind="fact" entry names
+    // "reference").
+    //
     // Areas this project belongs to – exact-match query + distinct
     // property projection, the same pattern `projectSet`'s `currentAreas`
     // already uses (memory_service_registry.dart) – reused, not duplicated.
@@ -465,79 +606,146 @@ extension MemoryServiceTags on MemoryService {
         }
       },
     );
-    final areaByNormalizedLower = <String, String>{
-      for (final a in areaNames) _normalizeTag(a).toLowerCase(): a,
-    };
-
-    // Step 2b's loose-key candidates (project/kind/every area), built once
-    // here alongside Step 2's exact-match maps – see that step's doc.
-    final projectLooseKey = _tagKey(_normalizeTag(project));
-    final kindByLooseKey = _kindByLooseKey();
-    final areaByLooseKey = <String, String>{
-      for (final a in areaNames) _tagKey(_normalizeTag(a)): a,
-    };
+    final redundancy = _TagRedundancyContext(
+      projects: [project],
+      areas: areaNames,
+    );
 
     final afterRedundancy = <String>[];
-    for (final normalized in survivingNormalized) {
-      final normalizedLower = normalized.toLowerCase();
-      if (normalizedLower == projectNormalizedLower) {
-        warnings.add(
-          'Tag "${MemoryService.sanitizeForLog(normalized)}" dropped: '
-          'matches the project name "${MemoryService.sanitizeForLog(project)}" '
-          '– project is already filterable.',
-        );
-        continue;
-      }
-      final matchedKind = kindByNormalizedLower[normalizedLower];
-      if (matchedKind != null) {
-        warnings.add(
-          'Tag "${MemoryService.sanitizeForLog(normalized)}" dropped: '
-          'matches a memory kind ("${MemoryService.sanitizeForLog(matchedKind)}") '
-          '– kind is already filterable.',
-        );
-        continue;
-      }
-      final matchedArea = areaByNormalizedLower[normalizedLower];
-      if (matchedArea != null) {
-        warnings.add(
-          'Tag "${MemoryService.sanitizeForLog(normalized)}" dropped: '
-          'matches an area this project belongs to – area is already '
-          'filterable.',
-        );
-        continue;
-      }
-
-      // Step 2b (2026-09-21 review3 M1 fix): not an exact match, so kept –
-      // but if its LOOSE key matches project/kind/area, warn about the
-      // near-duplicate instead of silently keeping it (this is what makes
-      // e.g. tag "episodes" warn as a near-duplicate of the kind
-      // "episode" instead of vanishing without a trace, while still being
-      // stored – the operator can decide, the server does not decide for
-      // them).
-      final looseKey = _tagKey(normalized);
-      if (looseKey == projectLooseKey) {
-        warnings.add(
-          'Tag "${MemoryService.sanitizeForLog(normalized)}" looks like a '
-          'near-duplicate of the project name '
-          '"${MemoryService.sanitizeForLog(project)}" – kept, but consider '
-          'the project filter instead of a tag.',
-        );
-      } else if (kindByLooseKey.containsKey(looseKey)) {
-        warnings.add(
-          'Tag "${MemoryService.sanitizeForLog(normalized)}" looks like a '
-          'near-duplicate of the kind '
-          '"${MemoryService.sanitizeForLog(kindByLooseKey[looseKey]!)}" – '
-          'kept, but consider the kind filter instead of a tag.',
-        );
-      } else if (areaByLooseKey.containsKey(looseKey)) {
-        warnings.add(
-          'Tag "${MemoryService.sanitizeForLog(normalized)}" looks like a '
-          'near-duplicate of an area this project belongs to – kept, but '
-          'consider the area filter instead of a tag.',
-        );
+    for (final normalized in resolvedNormalized) {
+      final match = redundancy.classify(normalized);
+      switch (match.kind) {
+        case _TagRedundancy.exactProject:
+          warnings.add(
+            'Tag "${MemoryService.sanitizeForLog(normalized)}" dropped: '
+            'matches the project name "${MemoryService.sanitizeForLog(project)}" '
+            '– project is already filterable.',
+          );
+          continue;
+        case _TagRedundancy.exactKind:
+          warnings.add(
+            'Tag "${MemoryService.sanitizeForLog(normalized)}" dropped: '
+            'matches a memory kind ("${MemoryService.sanitizeForLog(match.matched!)}") '
+            '– kind is already filterable.',
+          );
+          continue;
+        case _TagRedundancy.exactArea:
+          warnings.add(
+            'Tag "${MemoryService.sanitizeForLog(normalized)}" dropped: '
+            'matches an area this project belongs to – area is already '
+            'filterable.',
+          );
+          continue;
+        // Step 2b (2026-09-21 review3 M1 fix): not an exact match, so kept
+        // – but if its LOOSE key matches project/kind/area, warn about the
+        // near-duplicate instead of silently keeping it (this is what makes
+        // e.g. tag "episodes" warn as a near-duplicate of the kind
+        // "episode" instead of vanishing without a trace, while still being
+        // stored – the operator can decide, the server does not decide for
+        // them).
+        case _TagRedundancy.nearProject:
+          warnings.add(
+            'Tag "${MemoryService.sanitizeForLog(normalized)}" looks like a '
+            'near-duplicate of the project name '
+            '"${MemoryService.sanitizeForLog(project)}" – kept, but consider '
+            'the project filter instead of a tag.',
+          );
+        case _TagRedundancy.nearKind:
+          warnings.add(
+            'Tag "${MemoryService.sanitizeForLog(normalized)}" looks like a '
+            'near-duplicate of the kind '
+            '"${MemoryService.sanitizeForLog(match.matched!)}" – '
+            'kept, but consider the kind filter instead of a tag.',
+          );
+        case _TagRedundancy.nearArea:
+          warnings.add(
+            'Tag "${MemoryService.sanitizeForLog(normalized)}" looks like a '
+            'near-duplicate of an area this project belongs to – kept, but '
+            'consider the area filter instead of a tag.',
+          );
+        case _TagRedundancy.none:
+          break;
       }
 
       afterRedundancy.add(normalized);
+    }
+
+    // Step 2c (strict registry mode only): every surviving tag must be
+    // registered. One exact count() per tag (at most _tagMaxCount); the
+    // definitions are paged only when something is missing, to build the
+    // suggestions.
+    if (registryMode == RegistryMode.strict && afterRedundancy.isNotEmpty) {
+      final unregistered = [
+        for (final t in afterRedundancy)
+          if (!_isRegisteredTag(t)) t,
+      ];
+      if (unregistered.isNotEmpty) {
+        final registered = _registeredTagNames();
+        final allAliases = _allTagAliases();
+        final defContext = _tagDefinitionContext();
+        final described = <String>[];
+        var registrable = 0;
+        for (final t in unregistered) {
+          // Every surviving tag has a raw spelling (an alias is only
+          // substituted by a registered tag, which never reaches this
+          // check); `?? t` keeps the message intact if that ever changes.
+          final raw = firstRawFor[t] ?? t;
+          final from = raw == t
+              ? ''
+              : 'from "${MemoryService.sanitizeForLog(raw)}"; ';
+          // A tag that repeats another project, an area or a kind exactly
+          // can never be registered (tag_define rejects it) – say so
+          // instead of pointing at tag_define.
+          final check = _checkNewTagDefinition(
+            t,
+            defContext,
+            registered: registered,
+          );
+          final String hint;
+          if (check.redundantWith != null) {
+            hint = 'repeats ${check.redundantWith}, so it cannot be '
+                'registered as a tag – drop it';
+          } else if (check.aliasOf != null &&
+              !_isRegisteredTag(check.aliasOf!)) {
+            // A dangling alias: Step 1b kept the name (with a warning) –
+            // repeat that here, since this rejection replaces the result.
+            hint = 'kept as "${MemoryService.sanitizeForLog(t)}": '
+                '${_danglingAliasAdvice(t, check.aliasOf!)}';
+          } else {
+            final similar = _nearestRegisteredTags(
+              t,
+              registered,
+              aliases: allAliases,
+            );
+            final similarText = similar.isEmpty
+                ? 'no similar registered tag'
+                : 'similar registered tag${similar.length == 1 ? '' : 's'}: '
+                      '${similar.join(', ')}';
+            if (check.variants.isNotEmpty || check.aliasVariants.isNotEmpty) {
+              hint = '$similarText; tag_define accepts it only with '
+                  'allowSimilar: true';
+            } else {
+              registrable++;
+              hint = similarText;
+            }
+          }
+          described.add(
+            '"${MemoryService.sanitizeForLog(t)}" ($from$hint)',
+          );
+        }
+        final registerAdvice = registrable == 0
+            ? ''
+            : 'If a tag is genuinely new, register it first with tag_define '
+                  '(name, description: "<one sentence: what the tag '
+                  'marks>"), then retry. ';
+        _rejectStrict(
+          tool,
+          'tag(s) not registered (strict registry mode): '
+          '${described.join(', ')}. Use a registered tag or drop it. '
+          '${registerAdvice}tags_list shows every registered tag. Nothing '
+          'was written.',
+        );
+      }
     }
 
     // Step 3: near-duplicate suggestion – a normalized tag that is not YET
@@ -599,6 +807,857 @@ extension MemoryServiceTags on MemoryService {
   }
 
   // ---------------------------------------------------------------------
+  // Tag registry helpers (strict registry mode, 2026-10-06)
+  // ---------------------------------------------------------------------
+
+  /// Read. `true` iff a [TagDefinition] row has exactly this
+  /// (case-sensitive) name. Must run inside a lending.
+  bool _isRegisteredTag(String name) =>
+      _useQuery(
+        _tagDefs.query(TagDefinition_.name.equals(name, caseSensitive: true)),
+        (q) => q.count(),
+      ) >
+      0;
+
+  /// Read. The [TagDefinition] row for exactly this name, or null.
+  TagDefinition? _tagDefinitionFor(String name) => _useQuery(
+    _tagDefs.query(TagDefinition_.name.equals(name, caseSensitive: true)),
+    (q) => q.findFirst(),
+  );
+
+  /// Read. Every registered tag name – one bounded page-through of the
+  /// (registry-scale) [TagDefinition] box, never a `getAll()`.
+  List<String> _registeredTagNames() {
+    final names = <String>[];
+    _pageThrough<TagDefinition>(_tagDefs.query(), (page) {
+      for (final d in page) {
+        names.add(d.name);
+      }
+    });
+    return names;
+  }
+
+  /// Deterministic suggestions for an unregistered tag, ready to show:
+  /// registered names with the same loose key ([_tagKey]) first, then
+  /// names where one contains the other (case-insensitive; the shorter
+  /// side at least 3 characters, so `ab` does not match everything); each
+  /// group ordered by length difference, then name. [aliases] (alias ->
+  /// canonical tag) take part the same way: a match on an alias suggests
+  /// its canonical tag, shown as `"cooking" (alias "recipes")`. Each tag
+  /// is suggested once. At most [max].
+  List<String> _nearestRegisteredTags(
+    String normalized,
+    List<String> registered, {
+    Map<String, String> aliases = const {},
+    int max = 3,
+  }) {
+    final key = _tagKey(normalized);
+    final lower = normalized.toLowerCase();
+    // (compared name, suggested tag, alias or null)
+    final candidates = <(String, String, String?)>[
+      for (final r in registered) (r, r, null),
+      for (final a in aliases.entries) (a.key, a.value, a.key),
+    ];
+    int byCloseness((String, String, String?) a, (String, String, String?) b) {
+      final byLen = (a.$1.length - normalized.length).abs().compareTo(
+        (b.$1.length - normalized.length).abs(),
+      );
+      return byLen != 0 ? byLen : a.$1.compareTo(b.$1);
+    }
+
+    final sameKey = [
+      for (final c in candidates)
+        if (c.$1 != normalized && _tagKey(c.$1) == key) c,
+    ]..sort(byCloseness);
+    final contained = <(String, String, String?)>[];
+    for (final c in candidates) {
+      if (c.$1 == normalized || sameKey.contains(c)) continue;
+      final other = c.$1.toLowerCase();
+      final shorter = other.length < lower.length ? other : lower;
+      if (shorter.length < 3) continue;
+      if (other.contains(lower) || lower.contains(other)) contained.add(c);
+    }
+    contained.sort(byCloseness);
+    final out = <String>[];
+    final suggested = <String>{};
+    for (final c in [...sameKey, ...contained]) {
+      if (out.length >= max) break;
+      if (!suggested.add(c.$2)) continue;
+      final tag = '"${MemoryService.sanitizeForLog(c.$2)}"';
+      out.add(
+        c.$3 == null
+            ? tag
+            : '$tag (alias "${MemoryService.sanitizeForLog(c.$3!)}")',
+      );
+    }
+    return out;
+  }
+
+  /// Read. Every active or archived project (by name) and a redundancy
+  /// context over those projects and every area – what a new tag
+  /// definition (or alias) must not repeat. Merged tombstones are left
+  /// out: their name is no longer filterable. Built once per call;
+  /// registry-scale page-throughs.
+  ({_TagRedundancyContext context, Map<String, ProjectScope> projects})
+  _tagDefinitionContext() {
+    final projects = <String, ProjectScope>{};
+    // Only active and archived projects (2026-10-07): a merged-away name is
+    // a tombstone – its entries moved to the target, so it is no longer
+    // filterable and must not block a tag of the same name.
+    _pageThrough<ProjectScope>(
+      _projects.query(ProjectScope_.status.notEquals(ProjectStatus.merged)),
+      (page) {
+        for (final p in page) {
+          projects[p.name] = p;
+        }
+      },
+    );
+    final areaNames = <String>[];
+    _pageThrough<Area>(_areas.query(), (page) {
+      for (final a in page) {
+        areaNames.add(a.name);
+      }
+    });
+    areaNames.sort();
+    return (
+      context: _TagRedundancyContext(
+        projects: projects.keys.toList()..sort(),
+        areas: areaNames,
+      ),
+      projects: projects,
+    );
+  }
+
+  /// The create checks for a NEW [TagDefinition] named [normalized] – the
+  /// ONE implementation behind `tag_define` and the definition carry in
+  /// [_mergeTagsInto], so a merge can never register a name tag_define
+  /// would refuse.
+  ///
+  /// [redundantWith] is set when the name repeats a registered project,
+  /// a memory kind or an area exactly (e.g. `the archived project
+  /// "garden"`) – such a name can never be registered. [nearWarnings]
+  /// are the loose-key near matches (warnings only). [variants] are the
+  /// registered tags (minus [ignoreRegistered], e.g. the definitions a
+  /// merge is about to remove) that differ only by case, plural or
+  /// separators – tag_define rejects those unless `allowSimilar`.
+  /// [aliasOf] is the registered tag the name is already an alias of
+  /// (`TagAlias`, owners in [ignoreRegistered] excepted) – such a name must
+  /// not become a tag of its own, or the alias would stop resolving.
+  ({
+    String? redundantWith,
+    List<String> nearWarnings,
+    List<String> variants,
+    String? aliasOf,
+    List<String> aliasVariants,
+  })
+  _checkNewTagDefinition(
+    String normalized,
+    ({_TagRedundancyContext context, Map<String, ProjectScope> projects})
+    defContext, {
+    required List<String> registered,
+    Set<String> ignoreRegistered = const {},
+    bool includeNearKind = true,
+  }) {
+    final shown = MemoryService.sanitizeForLog(normalized);
+    final match = defContext.context.classify(normalized);
+    final matched = match.matched;
+    final quotedMatch = '"${MemoryService.sanitizeForLog(matched ?? '')}"';
+    String? redundantWith;
+    final nearWarnings = <String>[];
+    switch (match.kind) {
+      case _TagRedundancy.exactProject:
+        // Merged projects are not in the context (see
+        // [_tagDefinitionContext]), so only active or archived rows match.
+        final row = defContext.projects[matched];
+        redundantWith = row?.status == ProjectStatus.archived
+            ? 'the archived project $quotedMatch'
+            : 'the registered project $quotedMatch';
+      case _TagRedundancy.exactKind:
+        redundantWith = 'the memory kind $quotedMatch';
+      case _TagRedundancy.exactArea:
+        redundantWith = 'the area $quotedMatch';
+      case _TagRedundancy.nearProject:
+        nearWarnings.add(
+          '"$shown" looks like a near-duplicate of the project '
+          '$quotedMatch – registered, but consider the project filter '
+          'instead of a tag.',
+        );
+      case _TagRedundancy.nearKind:
+        if (includeNearKind) {
+          nearWarnings.add(
+            '"$shown" looks like a near-duplicate of the kind $quotedMatch – '
+            'registered, but consider the kind filter instead of a tag.',
+          );
+        }
+      case _TagRedundancy.nearArea:
+        nearWarnings.add(
+          '"$shown" looks like a near-duplicate of the area $quotedMatch – '
+          'registered, but consider the area filter instead of a tag.',
+        );
+      case _TagRedundancy.none:
+        break;
+    }
+    final key = _tagKey(normalized);
+    final variants = [
+      for (final r in registered)
+        if (r != normalized &&
+            !ignoreRegistered.contains(r) &&
+            _tagKey(r) == key)
+          r,
+    ]..sort();
+    final aliasRow = _tagAliasFor(normalized);
+    final aliasOf =
+        aliasRow == null || ignoreRegistered.contains(aliasRow.tag)
+        ? null
+        : aliasRow.tag;
+    // Spelling variants of an existing alias (`"recipes"` while `"recipe"`
+    // is an alias of `"cooking"`): shown as `"recipe" (alias of
+    // "cooking")`.
+    final aliasVariants = <String>[];
+    if (_tagAliases.count() > 0) {
+      for (final e in _allTagAliases().entries) {
+        if (e.key == normalized || ignoreRegistered.contains(e.value)) {
+          continue;
+        }
+        if (_tagKey(e.key) != key) continue;
+        aliasVariants.add(
+          '"${MemoryService.sanitizeForLog(e.key)}" (alias of '
+          '"${MemoryService.sanitizeForLog(e.value)}")',
+        );
+      }
+      aliasVariants.sort();
+    }
+    return (
+      redundantWith: redundantWith,
+      nearWarnings: nearWarnings,
+      variants: variants,
+      aliasOf: aliasOf,
+      aliasVariants: aliasVariants,
+    );
+  }
+
+  /// `"x" matches the registered project "p" – projects, kinds and areas
+  /// are already filterable, so a tag must not repeat one.`
+  static String _redundantTagReason(String normalized, String redundantWith) =>
+      '"${MemoryService.sanitizeForLog(normalized)}" matches $redundantWith '
+      '– projects, kinds and areas are already filterable, so a tag must not '
+      'repeat one.';
+
+  /// `"lessons" looks like a variant of the registered tag "lesson" (same
+  /// word apart from case, plural or separators)` – no final full stop.
+  static String _variantTagReason(String normalized, List<String> variants) =>
+      '"${MemoryService.sanitizeForLog(normalized)}" looks like a variant of '
+      'the registered tag${variants.length == 1 ? '' : 's'} '
+      '${variants.map((v) => '"${MemoryService.sanitizeForLog(v)}"').join(', ')} '
+      '(same word apart from case, plural or separators)';
+
+  /// Advice for a name that is an alias of a tag that is NOT registered
+  /// (a dangling alias): it does not resolve, so in strict mode writes
+  /// using it are rejected. Lists the ways out.
+  static String _danglingAliasAdvice(String alias, String tag) {
+    final a = MemoryService.sanitizeForLog(alias);
+    final t = MemoryService.sanitizeForLog(tag);
+    return 'the alias "$a" points at "$t", which is not registered – '
+        'tag_define "$t" first (then "$a" resolves to it); to drop the '
+        'alias instead, tag_define("$t", removeAliases: ["$a"]) after '
+        'registering "$t", or tag_remove "$a"';
+  }
+
+  /// Why tag_define would refuse [normalized] as a NEW tag, as one clause
+  /// built from a [_checkNewTagDefinition] result – or null when it would
+  /// accept it (given a description). The one source every "register it
+  /// with tag_define" hint consults, so no message points there in vain.
+  String? _tagDefineBlocker(
+    String normalized,
+    ({
+      String? redundantWith,
+      List<String> nearWarnings,
+      List<String> variants,
+      String? aliasOf,
+      List<String> aliasVariants,
+    })
+    check,
+  ) {
+    final shown = MemoryService.sanitizeForLog(normalized);
+    if (check.aliasOf != null) {
+      final owner = check.aliasOf!;
+      return _isRegisteredTag(owner)
+          ? '"$shown" is an alias of '
+                '"${MemoryService.sanitizeForLog(owner)}" – use that tag'
+          : _danglingAliasAdvice(normalized, owner);
+    }
+    if (check.redundantWith != null) {
+      return '"$shown" cannot be registered: it repeats '
+          '${check.redundantWith}';
+    }
+    if (check.variants.isNotEmpty) {
+      return '${_variantTagReason(normalized, check.variants)} – tag_define '
+          'accepts it only with allowSimilar: true';
+    }
+    if (check.aliasVariants.isNotEmpty) {
+      return '"$shown" looks like a variant of '
+          '${check.aliasVariants.join(', ')} – tag_define accepts it only '
+          'with allowSimilar: true';
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Tag aliases (TagAlias) – 2026-10-06
+  // ---------------------------------------------------------------------
+
+  /// Read. The alias row named exactly (case-sensitive) [name], or null.
+  TagAlias? _tagAliasFor(String name) => _useQuery(
+    _tagAliases.query(TagAlias_.name.equals(name, caseSensitive: true)),
+    (q) => q.findFirst(),
+  );
+
+  /// Read. Every alias row of the canonical [tag], sorted by name.
+  List<TagAlias> _aliasesOf(String tag) =>
+      _useQuery(
+        _tagAliases.query(TagAlias_.tag.equals(tag, caseSensitive: true)),
+        (q) => q.find(),
+      )..sort((a, b) => a.name.compareTo(b.name));
+
+  /// Read. Every alias, as alias name -> canonical tag – one bounded
+  /// page-through of the (registry-scale) TagAlias box.
+  Map<String, String> _allTagAliases() {
+    final aliases = <String, String>{};
+    _pageThrough<TagAlias>(_tagAliases.query(), (page) {
+      for (final a in page) {
+        aliases[a.name] = a.tag;
+      }
+    });
+    return aliases;
+  }
+
+  /// Pure. Validates and normalizes raw alias names for [tool] ([field]
+  /// is the argument name, for messages): a control character, an
+  /// over-long or an empty-after-normalization name rejects the call.
+  /// Duplicates collapse (first occurrence kept) with a warning;
+  /// [normalizedFrom] maps each raw spelling that normalization changed to
+  /// what is stored.
+  static ({
+    List<String> names,
+    List<String> warnings,
+    Map<String, String> normalizedFrom,
+  })
+  _normalizeAliasArgs(String tool, String field, List<String> raw) {
+    if (raw.length > MemoryService._tagMaxCount) {
+      throw ValidationException(
+        '$tool: "$field" has ${raw.length} entries, exceeding the '
+        '${MemoryService._tagMaxCount} limit.',
+      );
+    }
+    final names = <String>[];
+    final warnings = <String>[];
+    final normalizedFrom = <String, String>{};
+    final firstRaw = <String, String>{};
+    for (final alias in raw) {
+      MemoryService._requireLen(field, alias, MemoryService._tagMaxLen);
+      if (_controlCharPattern.hasMatch(alias)) {
+        throw ValidationException(
+          '$tool: alias "${MemoryService.sanitizeForLog(alias)}" contains '
+          'control characters.',
+        );
+      }
+      final normalized = _normalizeTag(alias);
+      if (normalized.isEmpty) {
+        throw ValidationException(
+          '$tool: alias "${MemoryService.sanitizeForLog(alias)}" is empty '
+          'after normalization.',
+        );
+      }
+      if (normalized != alias) normalizedFrom[alias] = normalized;
+      final first = firstRaw[normalized];
+      if (first == null) {
+        firstRaw[normalized] = alias;
+        names.add(normalized);
+      } else if (first != alias) {
+        warnings.add(
+          'Alias "${MemoryService.sanitizeForLog(alias)}" is a duplicate of '
+          '"${MemoryService.sanitizeForLog(first)}" (both normalize to '
+          '"${MemoryService.sanitizeForLog(normalized)}") – kept once.',
+        );
+      } else {
+        warnings.add(
+          'Alias "${MemoryService.sanitizeForLog(alias)}" is listed more '
+          'than once – kept once.',
+        );
+      }
+    }
+    return (names: names, warnings: warnings, normalizedFrom: normalizedFrom);
+  }
+
+  /// Read. Why [alias] cannot become an alias of [tag], or null when it
+  /// can: it is the tag itself, a registered tag of its own (definitions
+  /// in [ignoreRegistered] – about to be removed by a merge – excepted),
+  /// already an alias of ANOTHER tag (owners in [ignoreRegistered]
+  /// excepted – a merge moves those), repeats a project, area or kind
+  /// name exactly (the shared redundancy rule), or – unless
+  /// [allowSimilar] – is a spelling variant ([_tagKey]) of a registered
+  /// tag other than [tag] or of another tag's alias. An existing
+  /// unregistered Tag row of that name is fine – that is what aliases are
+  /// for. [registered]/[allAliases] may be passed in when checking several
+  /// aliases in one call.
+  ({String reason, bool similar})? _aliasConflict(
+    String alias,
+    String tag,
+    ({_TagRedundancyContext context, Map<String, ProjectScope> projects})
+    defContext, {
+    Set<String> ignoreRegistered = const {},
+    bool allowSimilar = false,
+    List<String>? registered,
+    Map<String, String>? allAliases,
+  }) {
+    final shown = '"${MemoryService.sanitizeForLog(alias)}"';
+    ({String reason, bool similar}) hard(String reason) =>
+        (reason: reason, similar: false);
+    if (alias == tag) return hard('$shown is the tag itself');
+    if (!ignoreRegistered.contains(alias) && _isRegisteredTag(alias)) {
+      return hard('$shown is a registered tag of its own');
+    }
+    final owner = _tagAliasFor(alias);
+    if (owner != null &&
+        owner.tag != tag &&
+        !ignoreRegistered.contains(owner.tag)) {
+      return hard(
+        '$shown is already an alias of '
+        '"${MemoryService.sanitizeForLog(owner.tag)}"',
+      );
+    }
+    final redundantWith = _checkNewTagDefinition(
+      alias,
+      defContext,
+      registered: const [],
+    ).redundantWith;
+    if (redundantWith != null) return hard('$shown repeats $redundantWith');
+    if (!allowSimilar) {
+      final key = _tagKey(alias);
+      final similarTags = [
+        for (final r in registered ?? _registeredTagNames())
+          if (r != tag &&
+              r != alias &&
+              !ignoreRegistered.contains(r) &&
+              _tagKey(r) == key)
+            '"${MemoryService.sanitizeForLog(r)}"',
+      ]..sort();
+      final similarAliases = [
+        for (final e in (allAliases ?? _allTagAliases()).entries)
+          if (e.value != tag &&
+              e.key != alias &&
+              !ignoreRegistered.contains(e.value) &&
+              _tagKey(e.key) == key)
+            '"${MemoryService.sanitizeForLog(e.key)}" (alias of '
+                '"${MemoryService.sanitizeForLog(e.value)}")',
+      ]..sort();
+      final similar = [...similarTags, ...similarAliases];
+      // The caller adds how to accept it anyway (tag_define:
+      // allowSimilar; a merge: tag_define with addAliases).
+      if (similar.isNotEmpty) {
+        return (
+          reason:
+              '$shown looks like a variant of ${similar.join(', ')} (same '
+              'word apart from case, plural or separators)',
+          similar: true,
+        );
+      }
+    }
+    return null;
+  }
+
+  /// Read. The warning for an alias that is also the name of a Tag row in
+  /// use: entries keep that tag until a tag_merge moves them.
+  String? _aliasInUseWarning(String alias, String tag) {
+    final row = _useQuery(
+      _tags.query(Tag_.name.equals(alias, caseSensitive: true)),
+      (q) => q.findFirst(),
+    );
+    if (row == null) return null;
+    final a = MemoryService.sanitizeForLog(alias);
+    final t = MemoryService.sanitizeForLog(tag);
+    return 'entries still carry "$a" – tag_merge(from: ["$a"], into: '
+        '"$t") moves them.';
+  }
+
+  /// Read. A merge target ([normalized]) that is an alias of a REGISTERED
+  /// tag is replaced by that tag – otherwise `tag_merge`/`tags_normalize`
+  /// would write the alias name as a tag of its own and bypass the
+  /// resolution `_prepareTags` does on every write. Logged, and the
+  /// returned [warning] uses the `_prepareTags` wording. An alias whose
+  /// tag is not registered (dangling) is left alone.
+  ({String target, String? warning}) _resolveAliasTarget(
+    String normalized, {
+    required String logPrefix,
+  }) {
+    if (_tagAliases.count() == 0 || _isRegisteredTag(normalized)) {
+      return (target: normalized, warning: null);
+    }
+    final alias = _tagAliasFor(normalized);
+    if (alias == null || !_isRegisteredTag(alias.tag)) {
+      return (target: normalized, warning: null);
+    }
+    final a = MemoryService.sanitizeForLog(normalized);
+    final t = MemoryService.sanitizeForLog(alias.tag);
+    log('[memory] $logPrefix: target "$a" is an alias of "$t" – using "$t"');
+    return (
+      target: alias.tag,
+      warning: 'Tag "$a" is an alias of "$t" – merged into "$t".',
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // tagDefine
+  // ---------------------------------------------------------------------
+
+  /// Registers a tag (a [TagDefinition] row) or updates its description.
+  /// Works in both registry modes; in strict mode only registered tags can
+  /// be attached by `remember`/`supersede`.
+  ///
+  /// [name] is normalized exactly like a tag on `remember`
+  /// ([_normalizeTag]: `apps-script` registers `appsScript`); a control
+  /// character or an empty result is rejected. An existing definition is
+  /// updated when a different non-blank [description] is given (action
+  /// `updated`), otherwise left alone (`unchanged`). Creating one needs a
+  /// non-blank [description] and is rejected when the name repeats a
+  /// registered project, a kind or an area exactly (those are filterable
+  /// already – the [_TagRedundancyContext] rule `remember` applies, here
+  /// against every registered project and area), or when it is a loose-key
+  /// variant ([_tagKey]: case, plural, separators) of another definition
+  /// unless [allowSimilar] is true. Warnings (never rejections): a near
+  /// match with a project/kind/area, unregistered [Tag] rows that are
+  /// spelling variants of the new name (candidates for `tag_merge`), and
+  /// an identifier/version-like name.
+  ///
+  /// [aliases] (2026-10-06), when given, REPLACES the tag's alias set
+  /// (an empty list clears it); [addAliases]/[removeAliases] change single
+  /// aliases instead (not combinable with [aliases]). Any of them may come
+  /// with or without a description, on create or on update. Each alias is
+  /// normalized like the name (`aliasesNormalizedFrom`, duplicates warned
+  /// about); the whole call is rejected, nothing written, when an alias to
+  /// add is the tag itself, another registered tag, an alias of ANOTHER
+  /// tag, a project/area/kind name, or – unless [allowSimilar] – a
+  /// spelling variant of another tag or alias ([_aliasConflict]). An
+  /// alias that is still a tag in use is allowed – that is the main use –
+  /// with a warning pointing at tag_merge. Every removed alias is named in
+  /// a warning. A name that is already an alias of another tag, or a
+  /// spelling variant of one (unless [allowSimilar]), cannot be registered
+  /// as a tag of its own.
+  ///
+  /// One lending, one write transaction. Result: `{name, action,
+  /// description, normalizedFrom?, aliases, aliasesAdded, aliasesRemoved,
+  /// warning?}`.
+  Future<Map<String, Object?>> tagDefine({
+    required String name,
+    String? description,
+    bool allowSimilar = false,
+    List<String>? aliases,
+    List<String>? addAliases,
+    List<String>? removeAliases,
+  }) async {
+    MemoryService._requireLen('name', name, MemoryService._tagMaxLen);
+    if (aliases != null && (addAliases != null || removeAliases != null)) {
+      throw ValidationException(
+        'tag_define: pass either "aliases" (replaces the whole alias set) '
+        'or "addAliases"/"removeAliases" (change single aliases), not '
+        'both.',
+      );
+    }
+    final replaceArg = aliases == null
+        ? null
+        : _normalizeAliasArgs('tag_define', 'aliases', aliases);
+    final addArg = addAliases == null
+        ? null
+        : _normalizeAliasArgs('tag_define', 'addAliases', addAliases);
+    final removeArg = removeAliases == null
+        ? null
+        : _normalizeAliasArgs('tag_define', 'removeAliases', removeAliases);
+    final toAdd = replaceArg?.names ?? addArg?.names ?? const <String>[];
+    final toRemove = removeArg?.names ?? const <String>[];
+    final both = [
+      for (final a in toAdd)
+        if (toRemove.contains(a)) '"${MemoryService.sanitizeForLog(a)}"',
+    ];
+    if (both.isNotEmpty) {
+      throw ValidationException(
+        'tag_define: ${both.join(', ')} appear in both "addAliases" and '
+        '"removeAliases".',
+      );
+    }
+    final aliasArgWarnings = [
+      ...?replaceArg?.warnings,
+      ...?addArg?.warnings,
+      ...?removeArg?.warnings,
+    ];
+    final aliasesNormalizedFrom = {
+      ...?replaceArg?.normalizedFrom,
+      ...?addArg?.normalizedFrom,
+      ...?removeArg?.normalizedFrom,
+    };
+    if (description != null) {
+      MemoryService._requireLen(
+        'description',
+        description,
+        _registryDescriptionMaxLen,
+      );
+    }
+    if (_controlCharPattern.hasMatch(name)) {
+      throw ValidationException(
+        'tag_define: "${MemoryService.sanitizeForLog(name)}" contains '
+        'control characters.',
+      );
+    }
+    final normalized = _normalizeTag(name);
+    if (normalized.isEmpty) {
+      throw ValidationException(
+        'tag_define: "${MemoryService.sanitizeForLog(name)}" is empty after '
+        'normalization.',
+      );
+    }
+    if (description != null && description.trim().isEmpty) {
+      throw ValidationException(
+        'tag_define: description must not be blank (one sentence: what the '
+        'tag marks).',
+      );
+    }
+    final shown = MemoryService.sanitizeForLog(normalized);
+
+    return _withSession('tag_define', () {
+      return store.runInTransaction(TxMode.write, () {
+        final warnings = <String>[...aliasArgWarnings];
+        // Aliases are validated first, so any conflict rejects the whole
+        // call before anything is written.
+        if (toAdd.isNotEmpty) {
+          final defContext = _tagDefinitionContext();
+          final registeredNames = _registeredTagNames();
+          final allAliases = _allTagAliases();
+          final conflicts = <String>[];
+          for (final alias in toAdd) {
+            final c = _aliasConflict(
+              alias,
+              normalized,
+              defContext,
+              allowSimilar: allowSimilar,
+              registered: registeredNames,
+              allAliases: allAliases,
+            );
+            if (c == null) continue;
+            final hint = c.similar
+                ? ' – pass allowSimilar: true if it is genuinely another '
+                      'name of "$shown"'
+                : '';
+            conflicts.add('${c.reason}$hint');
+          }
+          if (conflicts.isNotEmpty) {
+            throw ValidationException(
+              'tag_define: alias(es) rejected for "$shown": '
+              '${conflicts.join('; ')}. Nothing was written.',
+            );
+          }
+        }
+        final existing = _tagDefinitionFor(normalized);
+        String action;
+        final TagDefinition def;
+        if (existing != null) {
+          def = existing;
+          if (description != null && description != existing.description) {
+            existing.description = description;
+            existing.updatedAt = DateTime.now().toUtc();
+            _tagDefs.put(existing);
+            action = 'updated';
+            log(
+              '[memory] tag_define: updated the description of tag "$shown" '
+              '(id ${existing.id})',
+            );
+          } else {
+            action = 'unchanged';
+          }
+        } else {
+          if (description == null) {
+            throw ValidationException(
+              'tag_define: "$shown" is not registered yet – a description is '
+              'required to register a new tag (one sentence: what the tag '
+              'marks).',
+            );
+          }
+
+          // Same redundancy rule as remember's tags, against every
+          // registered project and area (a definition belongs to no single
+          // project) – the shared create checks, also used when a merge
+          // carries a definition over.
+          final check = _checkNewTagDefinition(
+            normalized,
+            _tagDefinitionContext(),
+            registered: _registeredTagNames(),
+          );
+          if (check.redundantWith != null) {
+            final reason = _redundantTagReason(
+              normalized,
+              check.redundantWith!,
+            );
+            throw ValidationException('tag_define: $reason');
+          }
+          if (check.aliasOf != null) {
+            final owner = MemoryService.sanitizeForLog(check.aliasOf!);
+            throw ValidationException(
+              'tag_define: "$shown" is an alias of "$owner" – use "$owner", '
+              'or first remove the alias from it (tag_define with name: '
+              '"$owner" and removeAliases: ["$shown"]).',
+            );
+          }
+          if (check.aliasVariants.isNotEmpty) {
+            if (!allowSimilar) {
+              throw ValidationException(
+                'tag_define: "$shown" looks like a variant of '
+                '${check.aliasVariants.join(', ')} (same word apart from '
+                'case, plural or separators). Use the tag the alias belongs '
+                'to, or pass allowSimilar: true if "$shown" is genuinely a '
+                'different label.',
+              );
+            }
+            log(
+              '[memory] tag_define: registering "$shown" next to the '
+              'similar alias(es) ${check.aliasVariants.join(', ')} '
+              '(allowSimilar: true)',
+            );
+          }
+          warnings.addAll(check.nearWarnings);
+          final variants = check.variants;
+          if (variants.isNotEmpty) {
+            final quoted = variants
+                .map((v) => '"${MemoryService.sanitizeForLog(v)}"')
+                .join(', ');
+            if (!allowSimilar) {
+              throw ValidationException(
+                'tag_define: ${_variantTagReason(normalized, variants)}. Use '
+                '${variants.length == 1 ? quoted : 'one of those'}, or pass '
+                'allowSimilar: true if "$shown" is genuinely a different '
+                'label.',
+              );
+            }
+            log(
+              '[memory] tag_define: registering "$shown" next to the similar '
+              'registered $quoted (allowSimilar: true)',
+            );
+          }
+          final key = _tagKey(normalized);
+
+          // Unregistered tag rows that are spelling variants of the new
+          // name: not an error (they may be legacy spellings), but worth a
+          // tag_merge.
+          final tagVariants = <String>[];
+          _pageThrough<Tag>(_tags.query(), (page) {
+            for (final t in page) {
+              if (t.name != normalized && _tagKey(t.name) == key) {
+                tagVariants.add(t.name);
+              }
+            }
+          });
+          tagVariants.removeWhere(_isRegisteredTag);
+          // An alias in use belongs to its own tag – never suggest merging
+          // it into this one.
+          tagVariants.removeWhere((t) => _tagAliasFor(t) != null);
+          tagVariants.sort();
+          if (tagVariants.isNotEmpty) {
+            final quoted = tagVariants
+                .map((v) => '"${MemoryService.sanitizeForLog(v)}"')
+                .join(', ');
+            warnings.add(
+              'Existing unregistered tag${tagVariants.length == 1 ? '' : 's'} '
+              '$quoted look${tagVariants.length == 1 ? 's' : ''} like a '
+              'spelling variant of "$shown" – consider tag_merge (from: '
+              '[$quoted], into: "$shown").',
+            );
+          }
+
+          if (_looksLikeIdentifierOrVersion(normalized)) {
+            warnings.add(
+              '"$shown" looks like an identifier or version – identifiers '
+              'and versions belong in the text, not in tags.',
+            );
+          }
+
+          def = TagDefinition(name: normalized, description: description);
+          def.id = _tagDefs.put(def);
+          action = 'created';
+          log('[memory] tag_define: registered tag "$shown" (id ${def.id})');
+        }
+
+        // Aliases: `aliases` REPLACES the tag's alias set; `addAliases`/
+        // `removeAliases` change single ones.
+        final current = _aliasesOf(def.name);
+        final have = {for (final row in current) row.name};
+        final aliasesAdded = <String>[];
+        final aliasesRemoved = <String>[];
+        if (replaceArg != null || addArg != null || removeArg != null) {
+          for (final alias in toRemove) {
+            if (!have.contains(alias)) {
+              warnings.add(
+                '"${MemoryService.sanitizeForLog(alias)}" is not an alias of '
+                '"$shown" – nothing removed.',
+              );
+            }
+          }
+          for (final row in current) {
+            final drop = replaceArg != null
+                ? !toAdd.contains(row.name)
+                : toRemove.contains(row.name);
+            if (!drop) continue;
+            _tagAliases.remove(row.id);
+            aliasesRemoved.add(row.name);
+            log(
+              '[memory] tag_define: removed alias '
+              '"${MemoryService.sanitizeForLog(row.name)}" of "$shown"',
+            );
+          }
+          for (final alias in toAdd) {
+            if (have.contains(alias)) continue;
+            final row = TagAlias(name: alias, tag: def.name);
+            row.id = _tagAliases.put(row);
+            aliasesAdded.add(alias);
+            log(
+              '[memory] tag_define: added alias '
+              '"${MemoryService.sanitizeForLog(alias)}" of "$shown" '
+              '(id ${row.id})',
+            );
+            final inUse = _aliasInUseWarning(alias, def.name);
+            if (inUse != null) warnings.add(inUse);
+          }
+          if (action == 'unchanged' &&
+              (aliasesAdded.isNotEmpty || aliasesRemoved.isNotEmpty)) {
+            action = 'updated';
+          }
+          // Never drop aliases unnoticed (e.g. a replace that forgot the
+          // ones tag_merge recorded).
+          if (aliasesRemoved.isNotEmpty) {
+            final listed = ([...aliasesRemoved]..sort())
+                .map((a) => '"${MemoryService.sanitizeForLog(a)}"')
+                .join(', ');
+            warnings.add('Alias(es) removed from "$shown": $listed.');
+          }
+        }
+        final aliasNames = [
+          for (final row in _aliasesOf(def.name)) row.name,
+        ];
+
+        final result = <String, Object?>{
+          'name': def.name,
+          'action': action,
+          'description': def.description,
+          if (normalized != name) 'normalizedFrom': name,
+          'aliases': aliasNames,
+          'aliasesAdded': aliasesAdded..sort(),
+          'aliasesRemoved': aliasesRemoved..sort(),
+          if (aliasesNormalizedFrom.isNotEmpty)
+            'aliasesNormalizedFrom': aliasesNormalizedFrom,
+          if (warnings.isNotEmpty) 'warning': warnings.join(' '),
+        };
+        return _applyGuardPeerWarning(result);
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // tagsList
   // ---------------------------------------------------------------------
 
@@ -620,6 +1679,29 @@ extension MemoryServiceTags on MemoryService {
   /// [Tag] rows with zero live usage – candidates for [tagRemove]).
   /// Purpose: lets a caller check for an existing tag before inventing a
   /// new one, and drives cleanup.
+  ///
+  /// Tag registry (2026-10-06): registered names ([TagDefinition]) are
+  /// listed alongside the [Tag] rows – a definition that is not used yet
+  /// appears with count 0 (and counts as `unused`, and joins
+  /// `variantGroups`). Every row carries `registered` and `description`
+  /// (null when unregistered); within one count, registered tags sort
+  /// first. Top-level `registryMode`, `registered` (definition count) and
+  /// `unregisteredInUse` (tags in live use without a definition – what a
+  /// switch to strict mode would reject) are added.
+  ///
+  /// Tag aliases (2026-10-06): a registered row carries its `aliases`; a
+  /// row for an unregistered tag that is an alias carries `aliasOf`; a
+  /// `prefix` also matches aliases, returning the canonical tag's row with
+  /// `matchedAlias`. An alias whose tag is not registered (dangling) is
+  /// flagged `aliasTargetMissing: true`. Top-level `aliases` is the number
+  /// of aliases.
+  ///
+  /// The two cleanup counts: `unregisteredInUse` – tags in live use that
+  /// are neither registered nor a resolvable alias (strict mode rejects
+  /// writes using them); `aliasesInUse` – alias names entries still carry
+  /// (writes resolve them; tag_merge them into their tag to clean up). A
+  /// name that is both registered and an alias row (a Sync edge case) is
+  /// treated as a tag, not listed as an alias, and logged.
   ///
   /// Bounded: one page-through of `Tag` (registry-scale) and one
   /// page-through of `MemoryEntry` (hydrating only the small `.tags`
@@ -682,21 +1764,105 @@ extension MemoryServiceTags on MemoryService {
           },
         );
 
-        var rows = <Map<String, Object?>>[
+        // Tag registry (2026-10-06): every TagDefinition (registry-scale,
+        // one page-through). A definition without a Tag row yet (registered
+        // but never used) is listed too, with count 0.
+        final descriptions = <String, String>{};
+        _pageThrough<TagDefinition>(_tagDefs.query(), (page) {
+          for (final d in page) {
+            descriptions[d.name] = d.description;
+          }
+        });
+        // name -> live usage count, over Tag rows and definitions.
+        final countByName = <String, int>{
           for (final entry in tagNames.entries)
-            {'name': entry.value, 'count': usage[entry.key] ?? 0},
+            entry.value: usage[entry.key] ?? 0,
+        };
+        for (final name in descriptions.keys) {
+          countByName.putIfAbsent(name, () => 0);
+        }
+        // Tag aliases (2026-10-06): alias -> canonical tag, and the
+        // aliases of every registered tag.
+        final aliasOf = _allTagAliases();
+        final aliasesByTag = <String, List<String>>{};
+        for (final e in aliasOf.entries) {
+          // A name that is both a registered tag and an alias row (only
+          // possible via Sync): the registered tag wins, as on writes, so
+          // it is not listed as an alias.
+          if (descriptions.containsKey(e.key)) {
+            log(
+              '[memory] tags_list: "${MemoryService.sanitizeForLog(e.key)}" '
+              'is both a registered tag and an alias of '
+              '"${MemoryService.sanitizeForLog(e.value)}" – listed as a tag',
+            );
+            continue;
+          }
+          (aliasesByTag[e.value] ??= <String>[]).add(e.key);
+        }
+        for (final list in aliasesByTag.values) {
+          list.sort();
+        }
+        Map<String, Object?> rowFor(String name) => {
+          'name': name,
+          'count': countByName[name]!,
+          'registered': descriptions.containsKey(name),
+          'description': descriptions[name],
+          // Only on registered rows / alias rows, so a store without
+          // aliases keeps its row shape.
+          if (descriptions.containsKey(name))
+            'aliases': aliasesByTag[name] ?? const <String>[],
+          if (!descriptions.containsKey(name) && aliasOf.containsKey(name))
+            'aliasOf': aliasOf[name],
+          // A dangling alias: its tag is not registered, so writes keep
+          // the alias name instead of resolving it.
+          if (!descriptions.containsKey(name) &&
+              aliasOf.containsKey(name) &&
+              !descriptions.containsKey(aliasOf[name]))
+            'aliasTargetMissing': true,
+        };
+
+        var rows = <Map<String, Object?>>[
+          for (final name in countByName.keys) rowFor(name),
         ];
         if (prefix != null && prefix.isNotEmpty) {
-          rows = rows
-              .where((r) => (r['name']! as String).startsWith(prefix))
-              .toList();
+          // A prefix also matches aliases: the canonical tag's row is
+          // returned (once), with the alias that matched.
+          final byName = {for (final r in rows) r['name']! as String: r};
+          final matched = <Map<String, Object?>>[];
+          final seen = <String>{};
+          for (final r in rows) {
+            final name = r['name']! as String;
+            if (name.startsWith(prefix) && seen.add(name)) matched.add(r);
+          }
+          final aliasNames = aliasOf.keys.toList()..sort();
+          for (final alias in aliasNames) {
+            if (!alias.startsWith(prefix)) continue;
+            final canonical = aliasOf[alias]!;
+            if (descriptions.containsKey(alias)) continue; // a tag itself
+            final row = byName[canonical];
+            if (row == null || !seen.add(canonical)) continue;
+            matched.add({
+              ...row,
+              'matchedAlias': alias,
+              if (!descriptions.containsKey(canonical))
+                'aliasTargetMissing': true,
+            });
+          }
+          rows = matched;
         }
         if (minCount != null) {
           rows = rows.where((r) => (r['count']! as int) >= minCount).toList();
         }
+        // Count desc, then registered before unregistered (2026-10-06 – a
+        // no-op while nothing is registered, so open-mode listings keep
+        // their order), then name.
         rows.sort((a, b) {
           final byCount = (b['count']! as int).compareTo(a['count']! as int);
           if (byCount != 0) return byCount;
+          final byRegistered = (b['registered']! as bool ? 1 : 0).compareTo(
+            a['registered']! as bool ? 1 : 0,
+          );
+          if (byRegistered != 0) return byRegistered;
           return (a['name']! as String).compareTo(b['name']! as String);
         });
         final totalMatching = rows.length;
@@ -715,11 +1881,12 @@ extension MemoryServiceTags on MemoryService {
         // above) grouped by _tagKey; only groups with more than one member
         // are reported (a lone tag is not a "variant" of anything).
         final byKey = <String, List<Map<String, Object?>>>{};
-        for (final entry in tagNames.entries) {
-          final key = _tagKey(entry.value);
+        for (final name in countByName.keys) {
+          final key = _tagKey(name);
           (byKey[key] ??= []).add({
-            'name': entry.value,
-            'count': usage[entry.key] ?? 0,
+            'name': name,
+            'count': countByName[name]!,
+            'registered': descriptions.containsKey(name),
           });
         }
         final variantGroups = <Map<String, Object?>>[];
@@ -742,8 +1909,24 @@ extension MemoryServiceTags on MemoryService {
           return (a['key']! as String).compareTo(b['key']! as String);
         });
 
-        final unused = tagNames.keys
-            .where((id) => (usage[id] ?? 0) == 0)
+        final unused = countByName.values.where((c) => c == 0).length;
+        // An alias in use is not counted in unregisteredInUse (a write
+        // resolves it); it is counted in aliasesInUse instead – entries
+        // still carrying the alias name, cleanup work for tag_merge.
+        bool isUsableAlias(String name) =>
+            !descriptions.containsKey(name) &&
+            aliasOf.containsKey(name) &&
+            descriptions.containsKey(aliasOf[name]);
+        final unregisteredInUse = countByName.entries
+            .where(
+              (e) =>
+                  e.value > 0 &&
+                  !descriptions.containsKey(e.key) &&
+                  !isUsableAlias(e.key),
+            )
+            .length;
+        final aliasesInUse = countByName.entries
+            .where((e) => e.value > 0 && isUsableAlias(e.key))
             .length;
 
         return {
@@ -759,6 +1942,17 @@ extension MemoryServiceTags on MemoryService {
           'liveDefinition': 'live = not superseded, not expired',
           'variantGroups': variantGroups,
           'unused': unused,
+          // Tag registry (2026-10-06): the mode this process enforces, how
+          // many tags are registered, and how many tags in live use are
+          // not (each row also says `registered` and carries its
+          // `description`).
+          'registryMode': registryMode.name,
+          'registered': descriptions.length,
+          'unregisteredInUse': unregisteredInUse,
+          // Tag aliases (2026-10-06): number of TagAlias rows, and how
+          // many alias names entries still carry.
+          'aliases': aliasOf.length,
+          'aliasesInUse': aliasesInUse,
           '_provenance_note': MemoryService._provenanceNote,
         };
       });
@@ -901,16 +2095,87 @@ extension MemoryServiceTags on MemoryService {
 
     return _withSession('tag_merge', () {
       return store.runInTransaction(dryRun ? TxMode.read : TxMode.write, () {
-        final merge = _mergeTagsInto(
-          dedupedFrom,
+        // Tag aliases: a target that is an alias of a registered tag means
+        // that tag (both modes, dry run alike).
+        final resolvedInto = _resolveAliasTarget(
           normalizedInto,
-          dryRun: dryRun,
           logPrefix: 'tag_merge',
         );
+        final target = resolvedInto.target;
+        if (resolvedInto.warning != null) {
+          intoWarnings.add(resolvedInto.warning!);
+          if (dedupedFrom.contains(target)) {
+            throw ValidationException(
+              'tag_merge: "into" ("${MemoryService.sanitizeForLog(into)}") '
+              'is an alias of "${MemoryService.sanitizeForLog(target)}", '
+              'which also appears in "from" – nothing to merge.',
+            );
+          }
+        }
+        // Strict registry mode: the merge target must end up registered –
+        // either it already is, or a "from" definition is carried over.
+        // Otherwise the merge would leave entries carrying a tag nobody
+        // could write again. Checked before anything changes (dry run
+        // too). Open mode merges into an unregistered target as before.
+        if (registryMode == RegistryMode.strict &&
+            !_isRegisteredTag(target) &&
+            !dedupedFrom.any(_isRegisteredTag)) {
+          // Only point at tag_define when it would accept the name.
+          final check = _checkNewTagDefinition(
+            target,
+            _tagDefinitionContext(),
+            registered: _registeredTagNames(),
+          );
+          final String advice;
+          if (check.aliasOf != null) {
+            // An alias whose own tag is not registered (the registered
+            // case was resolved above): merging into it would not help.
+            final dangling = _danglingAliasAdvice(target, check.aliasOf!);
+            advice = '${_upperFirst(dangling)}.';
+          } else if (check.aliasVariants.isNotEmpty) {
+            advice = '${_upperFirst(_tagDefineBlocker(target, check)!)} – '
+                'merge into the tag that alias belongs to instead, or '
+                'register it first if it is genuinely a different label, '
+                'then retry.';
+          } else if (check.redundantWith != null) {
+            advice = 'It cannot be registered: '
+                '${_redundantTagReason(target, check.redundantWith!)} '
+                'Merge into a registered tag (tags_list) instead.';
+          } else if (check.variants.isNotEmpty) {
+            advice = '${_variantTagReason(target, check.variants)}. '
+                'Merge into that registered tag instead, or – if it is '
+                'genuinely a different label – register it first with '
+                'tag_define (allowSimilar: true), then retry.';
+          } else {
+            advice = 'Register it first with tag_define, then retry.';
+          }
+          _rejectStrict(
+            'tag_merge',
+            'tag_merge: "into" ("${MemoryService.sanitizeForLog(target)}") '
+            'is not a registered tag and none of the "from" tags has a '
+            'definition to carry over (strict registry mode). $advice '
+            'Nothing was changed.',
+          );
+        }
+        final merge = _mergeTagsInto(
+          dedupedFrom,
+          target,
+          dryRun: dryRun,
+          logPrefix: 'tag_merge',
+          // Strict: a definition tag_define would refuse is never carried
+          // – the merge is rejected instead (nothing changed).
+          rejectBlockedCarry: registryMode == RegistryMode.strict,
+          // The kind near-match is already reported by the "into" check
+          // above – not twice.
+          carryNearKindWarning: false,
+        );
+        if (merge.carryWarning != null) intoWarnings.add(merge.carryWarning!);
+        intoWarnings.addAll(merge.carryNearWarnings);
+        intoWarnings.addAll(merge.aliasWarnings);
 
         log(
           '[memory] tag_merge ${dedupedFrom.length} tag(s) -> '
-          '"${MemoryService.sanitizeForLog(normalizedInto)}": '
+          '"${MemoryService.sanitizeForLog(target)}": '
           'entriesChanged=${merge.entriesChanged} '
           'linksReplaced=${merge.linksChanged} tagsRemoved=${merge.tagsRemoved} '
           'notFound=${merge.notFound.length} dryRun=$dryRun',
@@ -921,9 +2186,17 @@ extension MemoryServiceTags on MemoryService {
           'linksReplaced': merge.linksChanged,
           'tagsRemoved': merge.tagsRemoved,
           'notFound': merge.notFound,
-          'into': normalizedInto,
+          'into': target,
           'intoCreated': merge.intoCreated,
           'dryRun': dryRun,
+          // Tag registry: what happened to the definitions.
+          'definitionsRemoved': merge.definitionsRemoved,
+          'intoDefinition': merge.intoDefinition,
+          if (merge.carriedFrom != null) 'carriedFrom': merge.carriedFrom,
+          // Tag aliases: merged-away names recorded as aliases of "into",
+          // and aliases dropped with a merged-away definition.
+          'aliasesAdded': merge.aliasesAdded,
+          'aliasesRemoved': merge.aliasesRemoved,
         };
         // review3 M3: reported regardless of dryRun – these warnings are
         // pure validation of "into" itself, not data-dependent, so a
@@ -963,33 +2236,135 @@ extension MemoryServiceTags on MemoryService {
   /// `dryRun: true` reports the same counts a real run would produce
   /// without writing anything – same "same counting code either way" shape
   /// [tagMerge]'s own doc describes.
+  ///
+  /// Tag registry (2026-10-06): definitions follow the merge. If
+  /// [intoNormalized] has no [TagDefinition] but a `from` name has one,
+  /// the first such description (in [fromNames] order) is carried over to
+  /// a new definition for [intoNormalized] (`intoDefinition: carried`,
+  /// `carriedFrom`); an existing target definition is kept (`kept`);
+  /// otherwise `none`. Every `from` definition is removed
+  /// (`definitionsRemoved`), each with a log line that also names a
+  /// description that was not carried. A name with neither a [Tag] row
+  /// nor a definition is reported in `notFound`.
+  ///
+  /// Tag aliases (2026-10-06): with a registered target (`kept` or
+  /// `carried`), every merged-away name becomes an alias of the target and
+  /// the merged-away definitions' aliases move to it (`aliasesAdded`);
+  /// conflicts are skipped with a warning ([_aliasConflict]). Aliases that
+  /// do not move are removed (`aliasesRemoved`). Dry run: reported, not
+  /// written.
   ({
     int entriesChanged,
     int linksChanged,
     int tagsRemoved,
     List<String> notFound,
     bool intoCreated,
+    int definitionsRemoved,
+    String intoDefinition,
+    String? carriedFrom,
+    String? carryWarning,
+    List<String> carryNearWarnings,
+    List<String> aliasesAdded,
+    List<String> aliasesRemoved,
+    List<String> aliasWarnings,
   })
   _mergeTagsInto(
     List<String> fromNames,
     String intoNormalized, {
     required bool dryRun,
     required String logPrefix,
+    bool rejectBlockedCarry = false,
+    bool carryNearKindWarning = true,
   }) {
     final fromRows = <Tag>[];
+    final fromDefs = <TagDefinition>[];
     final notFound = <String>[];
     for (final name in fromNames) {
       final row = _useQuery(
         _tags.query(Tag_.name.equals(name)),
         (q) => q.findFirst(),
       );
-      if (row == null) {
+      final def = _tagDefinitionFor(name);
+      if (row == null && def == null) {
         notFound.add(name);
-      } else {
-        fromRows.add(row);
+        continue;
       }
+      if (row != null) fromRows.add(row);
+      if (def != null) fromDefs.add(def);
     }
     final fromIds = fromRows.map((t) => t.id).toSet();
+
+    // Definition carry, decided BEFORE anything is written: the target gets
+    // a definition only if tag_define itself would accept the name – the
+    // [_checkNewTagDefinition] result read the way tag_define reads it
+    // (project/area/kind name, alias of a tag, variant of a registered tag
+    // or of an alias – no allowSimilar here), ignoring the `from`
+    // definitions this merge removes. Otherwise the carry is blocked:
+    // [rejectBlockedCarry] (strict tag_merge) rejects the whole merge here,
+    // with nothing changed; otherwise (open tag_merge, tags_normalize) the
+    // merge goes ahead without the carry and says why.
+    final intoShown = MemoryService.sanitizeForLog(intoNormalized);
+    final intoRegistered = _isRegisteredTag(intoNormalized);
+    String? carryBlocked;
+    var blockedAsVariant = false;
+    var blockedByAliasVariant = false;
+    String? carryAliasOf;
+    // Near-match warnings of the target, reported when the carry happens
+    // (the same warnings tag_define gives when it registers a name).
+    var carryNearWarnings = const <String>[];
+    if (!intoRegistered && fromDefs.isNotEmpty) {
+      final check = _checkNewTagDefinition(
+        intoNormalized,
+        _tagDefinitionContext(),
+        registered: _registeredTagNames(),
+        ignoreRegistered: {for (final d in fromDefs) d.name},
+        includeNearKind: carryNearKindWarning,
+      );
+      if (check.redundantWith != null) {
+        carryBlocked = _redundantTagReason(
+          intoNormalized,
+          check.redundantWith!,
+        );
+      } else if (check.aliasOf != null) {
+        carryAliasOf = check.aliasOf;
+        carryBlocked =
+            '"$intoShown" is an alias of the registered tag '
+            '"${MemoryService.sanitizeForLog(carryAliasOf!)}".';
+      } else if (check.variants.isNotEmpty) {
+        carryBlocked = '${_variantTagReason(intoNormalized, check.variants)}.';
+        blockedAsVariant = true;
+      } else if (check.aliasVariants.isNotEmpty) {
+        carryBlocked =
+            '"$intoShown" looks like a variant of '
+            '${check.aliasVariants.join(', ')} (same word apart from case, '
+            'plural or separators).';
+        blockedAsVariant = true;
+        blockedByAliasVariant = true;
+      } else {
+        carryNearWarnings = check.nearWarnings;
+      }
+    }
+    if (carryBlocked != null && rejectBlockedCarry) {
+      final mergeInto = blockedByAliasVariant
+          ? 'the tag that alias belongs to'
+          : 'that registered tag';
+      final advice = carryAliasOf != null
+          ? 'Merge into "${MemoryService.sanitizeForLog(carryAliasOf)}" '
+                'instead.'
+          : blockedAsVariant
+          ? 'Merge into $mergeInto instead, or – if "$intoShown" is '
+                'genuinely a different label – register it first with '
+                'tag_define (allowSimilar: true), then merge.'
+          : '"$intoShown" cannot be registered – merge into a registered '
+                'tag (tags_list) instead.';
+      _rejectStrict(
+        logPrefix,
+        '$logPrefix: the definition of '
+        '"${MemoryService.sanitizeForLog(fromDefs.first.name)}" cannot be '
+        'carried over to "$intoShown" (strict registry mode): '
+        '$carryBlocked $advice Nothing was changed.',
+      );
+    }
 
     var intoTag = _useQuery(
       _tags.query(Tag_.name.equals(intoNormalized)),
@@ -1049,12 +2424,210 @@ extension MemoryServiceTags on MemoryService {
       }
     }
 
+    // Definitions follow the merge (see this method's doc).
+    final String intoDefinition;
+    String? carriedFrom;
+    String? carryWarning;
+    if (intoRegistered) {
+      intoDefinition = 'kept';
+    } else if (carryBlocked != null) {
+      intoDefinition = 'none';
+      carryWarning =
+          'The definition of '
+          '"${MemoryService.sanitizeForLog(fromDefs.first.name)}" was not '
+          'carried over to "$intoShown": $carryBlocked "$intoShown" stays '
+          'unregistered.';
+      log(
+        '[memory] $logPrefix: did not carry the definition of '
+        '"${MemoryService.sanitizeForLog(fromDefs.first.name)}" to '
+        '"$intoShown" – ${MemoryService.sanitizeForLog(carryBlocked)}'
+        '${dryRun ? ' (dry run)' : ''}',
+      );
+    } else if (fromDefs.isNotEmpty) {
+      intoDefinition = 'carried';
+      carriedFrom = fromDefs.first.name;
+      if (!dryRun) {
+        final carried = TagDefinition(
+          name: intoNormalized,
+          description: fromDefs.first.description,
+        );
+        carried.id = _tagDefs.put(carried);
+        log(
+          '[memory] $logPrefix: carried the definition of '
+          '"${MemoryService.sanitizeForLog(carriedFrom)}" to "$intoShown" '
+          '(id ${carried.id})',
+        );
+      }
+    } else {
+      intoDefinition = 'none';
+    }
+    // Taken BEFORE the merged-away definitions go, so a dry run and a
+    // real run see the same register (see the no-aliases warning below).
+    final registerInUse = _tagDefs.count() > 0;
+    if (!dryRun) {
+      for (final def in fromDefs) {
+        _tagDefs.remove(def.id);
+        final dropped = def.name == carriedFrom
+            ? ''
+            : ' – its description was not carried over: '
+                  '"${MemoryService.sanitizeForLog(MemoryService._truncateForError(def.description))}"';
+        log(
+          '[memory] $logPrefix: removed the definition of merged-away tag '
+          '"${MemoryService.sanitizeForLog(def.name)}" (id ${def.id})$dropped',
+        );
+      }
+    }
+
+    // Aliases (2026-10-06): when the target ends up registered, every
+    // merged-away name becomes an alias of it (so a later write under the
+    // old name resolves to the target), and the aliases of the merged-away
+    // definitions move along. A candidate that conflicts (another tag's
+    // alias, a registered tag, a project/area/kind name) is skipped with a
+    // warning; one that normalizes to the target itself needs no alias
+    // (normalization already resolves it) and is only logged. Without a
+    // registered target, the merged-away definitions' aliases are removed.
+    final fromDefNames = {for (final d in fromDefs) d.name};
+    final movedAliases = [for (final d in fromDefs) ..._aliasesOf(d.name)];
+    final aliasesAdded = <String>[];
+    final aliasWarnings = <String>[];
+    if (intoDefinition == 'none' && registerInUse) {
+      // The target is not registered, so the merged-away names cannot
+      // become its aliases. Said out loud once a register exists (a store
+      // without any registered tag keeps its old output).
+      final skipped = <String>[
+        for (final name in fromNames)
+          if (!notFound.contains(name) &&
+              _normalizeTag(name).isNotEmpty &&
+              _normalizeTag(name) != intoNormalized)
+            _normalizeTag(name),
+      ];
+      if (skipped.isNotEmpty) {
+        final listed = skipped
+            .map((n) => '"${MemoryService.sanitizeForLog(n)}"')
+            .join(', ');
+        // Only point at tag_define when it would accept the target.
+        final blocker = _tagDefineBlocker(
+          intoNormalized,
+          _checkNewTagDefinition(
+            intoNormalized,
+            _tagDefinitionContext(),
+            registered: _registeredTagNames(),
+            ignoreRegistered: fromDefNames,
+          ),
+        );
+        aliasWarnings.add(
+          blocker == null
+              ? 'No aliases recorded for $listed – "$intoShown" is not a '
+                    'registered tag; register it with tag_define first (or '
+                    'add them later with tag_define addAliases).'
+              : 'No aliases recorded for $listed – "$intoShown" is not a '
+                    'registered tag, and $blocker.',
+        );
+        log(
+          '[memory] $logPrefix: no aliases recorded for $listed – target '
+          '"$intoShown" is not registered${dryRun ? ' (dry run)' : ''}',
+        );
+      }
+    }
+    if (intoDefinition != 'none') {
+      final defContext = _tagDefinitionContext();
+      final candidates = <String>[];
+      for (final name in fromNames) {
+        if (notFound.contains(name)) continue;
+        final normalized = _normalizeTag(name);
+        if (normalized.isEmpty || _controlCharPattern.hasMatch(normalized)) {
+          aliasWarnings.add(
+            'alias "${MemoryService.sanitizeForLog(name)}" not recorded for '
+            '"$intoShown": not a valid tag name.',
+          );
+          continue;
+        }
+        if (normalized == intoNormalized) {
+          log(
+            '[memory] $logPrefix: no alias needed for '
+            '"${MemoryService.sanitizeForLog(name)}" – it normalizes to '
+            '"$intoShown"',
+          );
+          continue;
+        }
+        if (!candidates.contains(normalized)) candidates.add(normalized);
+      }
+      for (final row in movedAliases) {
+        if (row.name == intoNormalized) continue;
+        if (!candidates.contains(row.name)) candidates.add(row.name);
+      }
+      final existing = {for (final a in _aliasesOf(intoNormalized)) a.name};
+      for (final alias in candidates) {
+        if (existing.contains(alias)) continue;
+        final c = _aliasConflict(
+          alias,
+          intoNormalized,
+          defContext,
+          ignoreRegistered: fromDefNames,
+        );
+        if (c != null) {
+          // tag_merge has no allowSimilar – say how to record it anyway.
+          final a = MemoryService.sanitizeForLog(alias);
+          final conflict = c.similar
+              ? '${c.reason} – tag_define("$intoShown", addAliases: '
+                    '["$a"], allowSimilar: true) records it anyway'
+              : c.reason;
+          aliasWarnings.add(
+            'alias "${MemoryService.sanitizeForLog(alias)}" not recorded for '
+            '"$intoShown": $conflict.',
+          );
+          log(
+            '[memory] $logPrefix: skipped alias '
+            '"${MemoryService.sanitizeForLog(alias)}" for "$intoShown" – '
+            '${MemoryService.sanitizeForLog(conflict)}',
+          );
+          continue;
+        }
+        aliasesAdded.add(alias);
+      }
+    }
+    final aliasesRemoved = [
+      for (final row in movedAliases)
+        if (!aliasesAdded.contains(row.name)) row.name,
+    ]..sort();
+    if (!dryRun) {
+      // Old rows first: a moved alias is re-created pointing at the target.
+      for (final row in movedAliases) {
+        _tagAliases.remove(row.id);
+        if (!aliasesAdded.contains(row.name)) {
+          log(
+            '[memory] $logPrefix: removed alias '
+            '"${MemoryService.sanitizeForLog(row.name)}" of merged-away tag '
+            '"${MemoryService.sanitizeForLog(row.tag)}"',
+          );
+        }
+      }
+      for (final alias in aliasesAdded) {
+        final row = TagAlias(name: alias, tag: intoNormalized);
+        row.id = _tagAliases.put(row);
+        log(
+          '[memory] $logPrefix: added alias '
+          '"${MemoryService.sanitizeForLog(alias)}" of "$intoShown" '
+          '(id ${row.id})',
+        );
+      }
+    }
+    aliasesAdded.sort();
+
     return (
       entriesChanged: entriesChanged,
       linksChanged: linksChanged,
       tagsRemoved: dryRun ? fromRows.length : tagsRemoved,
       notFound: notFound,
       intoCreated: intoCreated,
+      definitionsRemoved: fromDefs.length,
+      intoDefinition: intoDefinition,
+      carriedFrom: carriedFrom,
+      carryWarning: carryWarning,
+      carryNearWarnings: carryNearWarnings,
+      aliasesAdded: aliasesAdded,
+      aliasesRemoved: aliasesRemoved,
+      aliasWarnings: aliasWarnings,
     );
   }
 
@@ -1100,19 +2673,28 @@ extension MemoryServiceTags on MemoryService {
     return _withSession('tag_remove', () {
       return store.runInTransaction(dryRun ? TxMode.read : TxMode.write, () {
         final rows = <Tag>[];
+        final defs = <TagDefinition>[];
         final notFound = <String>[];
         for (final name in dedupedTags) {
           final row = _useQuery(
             _tags.query(Tag_.name.equals(name)),
             (q) => q.findFirst(),
           );
-          if (row == null) {
+          // Tag registry: a matching definition is removed with the tag; a
+          // name is "not found" only when it has neither.
+          final def = _tagDefinitionFor(name);
+          if (row == null && def == null) {
             notFound.add(name);
-          } else {
-            rows.add(row);
+            continue;
           }
+          if (row != null) rows.add(row);
+          if (def != null) defs.add(def);
         }
         final ids = rows.map((t) => t.id).toSet();
+        // Tag aliases: a removed definition takes its aliases with it.
+        final removedAliases = [
+          for (final def in defs) ..._aliasesOf(def.name),
+        ];
 
         var entriesChanged = 0;
         var linksRemoved = 0;
@@ -1138,6 +2720,21 @@ extension MemoryServiceTags on MemoryService {
             _tags.remove(tag.id);
             tagsRemoved++;
           }
+          for (final def in defs) {
+            _tagDefs.remove(def.id);
+            log(
+              '[memory] tag_remove: removed the definition of tag '
+              '"${MemoryService.sanitizeForLog(def.name)}" (id ${def.id})',
+            );
+          }
+          for (final alias in removedAliases) {
+            _tagAliases.remove(alias.id);
+            log(
+              '[memory] tag_remove: removed alias '
+              '"${MemoryService.sanitizeForLog(alias.name)}" of tag '
+              '"${MemoryService.sanitizeForLog(alias.tag)}"',
+            );
+          }
         }
 
         log(
@@ -1153,7 +2750,27 @@ extension MemoryServiceTags on MemoryService {
           'tagsRemoved': dryRun ? rows.length : tagsRemoved,
           'notFound': notFound,
           'dryRun': dryRun,
+          'definitionsRemoved': defs.length,
+          'aliasesRemoved': [for (final a in removedAliases) a.name]..sort(),
         };
+        // A name that is an alias stays an alias: tag_remove removes tags
+        // and registrations, not aliases of other tags – say how instead.
+        final aliasHints = <String>[];
+        if (_tagAliases.count() > 0) {
+          for (final name in dedupedTags) {
+            final alias = _tagAliasFor(name);
+            if (alias == null || defs.any((d) => d.name == alias.tag)) {
+              continue;
+            }
+            final a = MemoryService.sanitizeForLog(name);
+            final t = MemoryService.sanitizeForLog(alias.tag);
+            aliasHints.add(
+              '"$a" is an alias of "$t" and stays one – tag_define(name: '
+              '"$t", removeAliases: ["$a"]) removes it.',
+            );
+          }
+        }
+        if (aliasHints.isNotEmpty) result['warning'] = aliasHints.join(' ');
         return dryRun ? result : _applyGuardPeerWarning(result);
       });
     });
@@ -1278,6 +2895,23 @@ extension MemoryServiceTags on MemoryService {
           });
         }
 
+        // Tag aliases (2026-10-06): a normalized target that is an alias
+        // of a registered tag means that tag – same rule as tag_merge's
+        // "into", so normalization never writes an alias as a tag of its
+        // own. Groups that resolve to the same tag are merged.
+        final targetAliasWarnings = <String>[];
+        if (byTarget.isNotEmpty && _tagAliases.count() > 0) {
+          final resolvedByTarget = <String, List<String>>{};
+          for (final key in byTarget.keys.toList()..sort()) {
+            final r = _resolveAliasTarget(key, logPrefix: 'tags_normalize');
+            if (r.warning != null) targetAliasWarnings.add(r.warning!);
+            (resolvedByTarget[r.target] ??= <String>[]).addAll(byTarget[key]!);
+          }
+          byTarget
+            ..clear()
+            ..addAll(resolvedByTarget);
+        }
+
         // Phase 3: merge each target group via the SAME primitive
         // [tagMerge] uses – processed in SORTED target order for
         // deterministic output/logs (a Map's iteration order is not
@@ -1285,6 +2919,10 @@ extension MemoryServiceTags on MemoryService {
         final renamed = <Map<String, Object?>>[];
         var merged = 0;
         var tagsRemoved = 0;
+        var definitionsRemoved = 0;
+        final normalizeWarnings = <String>[...targetAliasWarnings];
+        final aliasesAdded = <String>[];
+        final aliasesRemoved = <String>[];
         final targets = byTarget.keys.toList()..sort();
         for (final target in targets) {
           final names = byTarget[target]!;
@@ -1295,6 +2933,58 @@ extension MemoryServiceTags on MemoryService {
             logPrefix: 'tags_normalize',
           );
           tagsRemoved += result.tagsRemoved;
+          definitionsRemoved += result.definitionsRemoved;
+          // tags_normalize never rejects: a blocked carry is reported, and
+          // in strict mode so is a target that stays unregistered (every
+          // write using it would be rejected).
+          if (result.carryWarning != null) {
+            normalizeWarnings.add(result.carryWarning!);
+          }
+          normalizeWarnings.addAll(result.carryNearWarnings);
+          normalizeWarnings.addAll(result.aliasWarnings);
+          aliasesAdded.addAll(result.aliasesAdded);
+          aliasesRemoved.addAll(result.aliasesRemoved);
+          if (registryMode == RegistryMode.strict &&
+              result.intoDefinition == 'none') {
+            final shown = MemoryService.sanitizeForLog(target);
+            // Only point at tag_define when it would accept the name.
+            final check = _checkNewTagDefinition(
+              target,
+              _tagDefinitionContext(),
+              registered: _registeredTagNames(),
+            );
+            final String advice;
+            if (check.aliasOf != null) {
+              // An alias whose own tag is not registered (a registered
+              // one was resolved above): it does not resolve.
+              advice = 'writes using it are rejected; '
+                  '${_danglingAliasAdvice(target, check.aliasOf!)}.';
+            } else if (check.aliasVariants.isNotEmpty) {
+              advice = 'writes using it are rejected; '
+                  '${_tagDefineBlocker(target, check)} – or tag_merge it '
+                  'into the tag that alias belongs to.';
+            } else if (check.redundantWith != null) {
+              advice = 'writes using it are rejected; it cannot be registered '
+                  '(it repeats ${check.redundantWith}) – tag_merge it into a '
+                  'real tag or tag_remove it.';
+            } else if (check.variants.isNotEmpty) {
+              final reason = _variantTagReason(target, check.variants);
+              advice = 'writes using it are rejected; $reason – tag_merge '
+                  'it into that tag, or register it with tag_define '
+                  '(allowSimilar: true) if it is genuinely a different label.';
+            } else {
+              advice = 'writes using it are rejected; register it with '
+                  'tag_define, or merge or remove it (tag_merge, tag_remove).';
+            }
+            normalizeWarnings.add(
+              '"$shown" is not a registered tag (strict registry mode) – '
+              '$advice',
+            );
+            log(
+              '[memory] tags_normalize: target "$shown" stays unregistered '
+              '(strict registry mode)${dryRun ? ' (dry run)' : ''}',
+            );
+          }
           for (final name in names) {
             renamed.add({
               'from': name,
@@ -1318,6 +3008,11 @@ extension MemoryServiceTags on MemoryService {
           'skipped': skipped,
           'tagsRemoved': tagsRemoved,
           'dryRun': dryRun,
+          'definitionsRemoved': definitionsRemoved,
+          'aliasesAdded': aliasesAdded..sort(),
+          'aliasesRemoved': aliasesRemoved..sort(),
+          if (normalizeWarnings.isNotEmpty)
+            'warning': normalizeWarnings.join(' '),
         };
         return dryRun ? resultMap : _applyGuardPeerWarning(resultMap);
       });

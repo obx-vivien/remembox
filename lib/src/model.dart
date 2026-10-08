@@ -716,6 +716,112 @@ class Fact {
 }
 
 // ---------------------------------------------------------------------------
+// Tag registry (strict registry mode)
+// ---------------------------------------------------------------------------
+
+/// Registered tag vocabulary: one row per tag name that `tag_define`
+/// registered, with a one-sentence description. In strict registry mode
+/// (`OBX_MEMORY_REGISTRY_MODE=strict`) a write may only attach tags that
+/// have a row here; in open mode the table is informational
+/// (`tags_list` reports `registered`/`description`).
+///
+/// A new entity instead of a property on [Tag]: every pre-existing entity
+/// stays byte-identical (additive-only schema, see CLAUDE.md).
+///
+/// Name-keyed, NO relation to [Tag] – same reason as [AreaMembership]: a
+/// cross-device replace on a unique name mints a new local id, which would
+/// leave a ToOne dangling. Two devices defining the same name converge via
+/// the Sync-mandated replace (content-neutral apart from the description:
+/// the last write wins).
+///
+/// No stored loose key (unlike [ProjectScope.nameKey]): the tag loose key
+/// (`_tagKey` in memory_service_tags.dart) has changed several times, so a
+/// persisted derived key would go stale; the registry is small enough to
+/// page through, as the near-duplicate check over [Tag] already does.
+///
+/// `@Sync()`: user-authored vocabulary that must replicate with the tags
+/// it describes.
+@Entity()
+@Sync()
+class TagDefinition {
+  @Id()
+  int id = 0;
+
+  /// Normalized tag name (camelCase, as `_normalizeTag` produces it) –
+  /// exact and case-sensitive; equals the [Tag.name] a write attaches.
+  /// Replace-on-conflict is Sync-mandated – see [MemoryEntry.contentHash];
+  /// the local write path is query-first in a write transaction
+  /// (`tagDefine`, `_mergeTagsInto`). Value-indexed, not hash – see
+  /// "Unique value index" above (2026-09-23, 0.3.1).
+  @Unique(onConflict: ConflictStrategy.replace)
+  @Index(type: IndexType.value)
+  String name;
+
+  /// What the tag marks, one sentence. Non-blank on create (enforced by
+  /// the write path); cap `descriptionMaxLen`.
+  String description;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime createdAt;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime updatedAt;
+
+  TagDefinition({
+    this.id = 0,
+    required this.name,
+    required this.description,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc(),
+       updatedAt = updatedAt ?? createdAt ?? DateTime.now().toUtc();
+}
+
+/// An alternative name for a registered tag: an old spelling, a synonym
+/// or a term from another language (`chores` for `housework`, `recipe`
+/// for `cooking`). A write that names the alias stores the canonical
+/// [tag] instead (with a warning) – resolved in `_prepareTags`, the single
+/// place for tag rules; `tag_define` sets the aliases, `tag_merge` records
+/// merged-away names as aliases.
+///
+/// Name-keyed, NO relation to [TagDefinition] or [Tag] – same reason as
+/// [TagDefinition] and [AreaMembership]: a cross-device replace on a
+/// unique name mints a new local id, which would leave a ToOne dangling.
+///
+/// `@Sync()`: replicates with the definitions it belongs to.
+@Entity()
+@Sync()
+class TagAlias {
+  @Id()
+  int id = 0;
+
+  /// The alias, normalized like a tag (`_normalizeTag`) – exact and
+  /// case-sensitive. One alias belongs to exactly one tag: unique.
+  /// Replace-on-conflict is Sync-mandated – see [MemoryEntry.contentHash];
+  /// the local write path is query-first in a write transaction and
+  /// rejects an alias that already belongs to another tag. Value-indexed,
+  /// not hash – see "Unique value index" above (2026-09-23, 0.3.1).
+  @Unique(onConflict: ConflictStrategy.replace)
+  @Index(type: IndexType.value)
+  String name;
+
+  /// The canonical tag: a [TagDefinition.name]. Value-indexed, so every
+  /// alias of one tag is a single indexed lookup.
+  @Index(type: IndexType.value)
+  String tag;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime createdAt;
+
+  TagAlias({
+    this.id = 0,
+    required this.name,
+    required this.tag,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc();
+}
+
+// ---------------------------------------------------------------------------
 // Local-only retrieval index (the ONE canonical ANN index)
 // ---------------------------------------------------------------------------
 

@@ -10,7 +10,9 @@
 /// asserts every 0.2.0 row survived untouched and the new areas/facts
 /// boxes are immediately usable. This is the automated version of U2
 /// ("opening an existing store with additional entities is a silent
-/// additive schema update") — pinned instead of assumed.
+/// additive schema update") – pinned instead of assumed. The same is
+/// pinned for a 0.3.1-model store (9 entities, before `TagDefinition` and
+/// `TagAlias`).
 library;
 
 import 'dart:convert';
@@ -34,50 +36,58 @@ const _oldEntityNames = {
   'Tag',
 };
 
-/// Reads the exact 0.2.0 `last*Id` counters from the frozen fixture
-/// (single source of truth shared with test/model_compat_test.dart — no
+/// The 9 entity names of the 0.3.1 model
+/// (test/fixtures/objectbox-model-0.3.1.json): the 0.2.0 five plus the
+/// four areas/facts entities – everything before `TagDefinition`.
+const _entityNames031 = {
+  ..._oldEntityNames,
+  'Area',
+  'AreaMembership',
+  'Fact',
+  'ProjectScope',
+};
+
+/// Reads the exact `last*Id` counters from a frozen model fixture (single
+/// source of truth shared with test/model_compat_test.dart – no
 /// hand-duplicated uid literals here).
-Map<String, obx_int.IdUid> _oldCounters() {
+Map<String, obx_int.IdUid> _fixtureCounters(String fixturePath) {
   final json =
-      jsonDecode(
-            File(
-              'test/fixtures/objectbox-model-0.2.0.json',
-            ).readAsStringSync(),
-          )
-          as Map<String, Object?>;
+      jsonDecode(File(fixturePath).readAsStringSync()) as Map<String, Object?>;
   return {
     for (final key in ['lastEntityId', 'lastIndexId', 'lastRelationId'])
       key: obx_int.IdUid.fromString(json[key] as String),
   };
 }
 
-/// Builds a [obx_int.ModelDefinition] containing ONLY the 5 pre-existing
-/// entities, reusing the exact [obx_int.ModelEntity]/[obx_int.
-/// EntityDefinition] objects the FULL generated model
-/// ([getObjectBoxModel]) already built — filtered, never re-declared by
-/// hand, so this can never drift from the real schema.
-obx_int.ModelDefinition _oldModelDefinition() {
+/// Builds a [obx_int.ModelDefinition] containing ONLY the entities named
+/// in [entityNames], with the `last*Id` counters of [fixturePath],
+/// reusing the exact [obx_int.ModelEntity]/[obx_int.EntityDefinition]
+/// objects the FULL generated model ([getObjectBoxModel]) already built –
+/// filtered, never re-declared by hand, so this can never drift from the
+/// real schema.
+obx_int.ModelDefinition _filteredModelDefinition(
+  Set<String> entityNames,
+  String fixturePath,
+) {
   final full = getObjectBoxModel();
-  final oldEntities = full.model.entities
-      .where((e) => _oldEntityNames.contains(e.name))
+  final entities = full.model.entities
+      .where((e) => entityNames.contains(e.name))
       .toList(growable: false);
-  if (oldEntities.length != _oldEntityNames.length) {
+  if (entities.length != entityNames.length) {
     throw StateError(
-      'expected exactly the 5 pre-existing entities '
-      '($_oldEntityNames), found '
-      '${oldEntities.map((e) => e.name).toList()} — the areas/facts '
-      'entities must be named exactly Area/AreaMembership/Fact/'
-      'ProjectScope for this filter to work.',
+      'expected exactly the entities $entityNames, found '
+      '${entities.map((e) => e.name).toList()} – an entity was renamed or '
+      'removed, so this filter no longer reproduces the old model.',
     );
   }
-  final oldBindings = <Type, obx_int.EntityDefinition>{
+  final bindings = <Type, obx_int.EntityDefinition>{
     for (final entry in full.bindings.entries)
-      if (_oldEntityNames.contains(entry.key.toString())) entry.key: entry.value,
+      if (entityNames.contains(entry.key.toString())) entry.key: entry.value,
   };
-  final counters = _oldCounters();
-  final oldModel = obx_int.ModelInfo(
+  final counters = _fixtureCounters(fixturePath);
+  final model = obx_int.ModelInfo(
     generatorVersion: full.model.generatorVersion,
-    entities: oldEntities,
+    entities: entities,
     lastEntityId: counters['lastEntityId']!,
     lastIndexId: counters['lastIndexId']!,
     lastRelationId: counters['lastRelationId']!,
@@ -90,8 +100,14 @@ obx_int.ModelDefinition _oldModelDefinition() {
     modelVersionParserMinimum: full.model.modelVersionParserMinimum,
     version: full.model.version,
   );
-  return obx_int.ModelDefinition(oldModel, oldBindings);
+  return obx_int.ModelDefinition(model, bindings);
 }
+
+/// The 0.2.0 (5-entity) model.
+obx_int.ModelDefinition _oldModelDefinition() => _filteredModelDefinition(
+  _oldEntityNames,
+  'test/fixtures/objectbox-model-0.2.0.json',
+);
 
 void main() {
   late Directory tempDir;
@@ -217,6 +233,110 @@ void main() {
         newStore.box<Area>().put(area);
       });
       expect(newStore.box<Area>().count(), 1);
+
+      // The tag registry (strict registry mode) is usable too.
+      expect(newStore.box<TagDefinition>().count(), 0);
+      newStore.box<TagDefinition>().put(
+        TagDefinition(name: 'lesson', description: 'What we learned.'),
+      );
+      expect(newStore.box<TagDefinition>().count(), 1);
+      newStore.box<TagAlias>().put(
+        TagAlias(name: 'chores', tag: 'housework'),
+      );
+      expect(newStore.box<TagAlias>().count(), 1);
+    },
+  );
+
+  test(
+    'a store built with the 0.3.1 (9-entity) model opens with the current '
+    'model, keeps every row, and the TagDefinition and TagAlias boxes are '
+    'immediately usable',
+    () {
+      ensureNativeLibraryLoaded();
+      final oldStore = Store(
+        _filteredModelDefinition(
+          _entityNames031,
+          'test/fixtures/objectbox-model-0.3.1.json',
+        ),
+        directory: tempDir.path,
+      );
+      final oldSyncClient = startLocalActivationSyncClient(oldStore);
+
+      late int entryId;
+      oldStore.runInTransaction(TxMode.write, () {
+        final tag = Tag(name: 'lesson');
+        final entry = MemoryEntry(
+          title: '0.3.1-era entry',
+          text: 'synthetic body written under the 0.3.1 model',
+          kind: MemoryKind.fact,
+          sourceType: MemorySource.note,
+          project: 'garden',
+          contentHash: 'store-031-entry-hash',
+        );
+        entry.tags.add(tag);
+        entryId = oldStore.box<MemoryEntry>().put(entry);
+        oldStore.box<ProjectScope>().put(
+          ProjectScope(
+            name: 'garden',
+            nameKey: ScopeKey.of('garden'),
+            description: 'Vegetable beds and fruit trees.',
+          ),
+        );
+        oldStore.box<Area>().put(
+          Area(name: 'family', nameKey: ScopeKey.of('family')),
+        );
+        oldStore.box<AreaMembership>().put(
+          AreaMembership(
+            key: AreaMembership.keyFor('family', 'garden'),
+            area: 'family',
+            project: 'garden',
+          ),
+        );
+        oldStore.box<Fact>().put(
+          Fact(
+            project: 'garden',
+            subject: 'Bed 1',
+            attribute: 'crop',
+            factKey: Fact.keyFor('garden', 'Bed 1', 'crop'),
+            valueType: FactValueType.text,
+            valueText: 'beans',
+            sourceType: MemorySource.note,
+          ),
+        );
+      });
+
+      oldSyncClient.close();
+      oldStore.close();
+
+      final newStore = openMemoryStore(tempDir.path);
+      final newSyncClient = startLocalActivationSyncClient(newStore);
+      addTearDown(() {
+        newSyncClient.close();
+        newStore.close();
+      });
+
+      expect(newStore.box<MemoryEntry>().count(), 1);
+      expect(newStore.box<Tag>().count(), 1);
+      expect(newStore.box<ProjectScope>().count(), 1);
+      expect(newStore.box<Area>().count(), 1);
+      expect(newStore.box<AreaMembership>().count(), 1);
+      expect(newStore.box<Fact>().count(), 1);
+      final entry = newStore.box<MemoryEntry>().get(entryId)!;
+      expect(entry.contentHash, 'store-031-entry-hash');
+      expect(entry.tags.map((t) => t.name), ['lesson']);
+      final scope = newStore.box<ProjectScope>().getAll().single;
+      expect(scope.description, 'Vegetable beds and fruit trees.');
+
+      expect(newStore.box<TagDefinition>().count(), 0);
+      final defId = newStore.box<TagDefinition>().put(
+        TagDefinition(name: 'lesson', description: 'What we learned.'),
+      );
+      expect(newStore.box<TagDefinition>().get(defId)!.name, 'lesson');
+      expect(newStore.box<TagAlias>().count(), 0);
+      final aliasId = newStore.box<TagAlias>().put(
+        TagAlias(name: 'chores', tag: 'housework'),
+      );
+      expect(newStore.box<TagAlias>().get(aliasId)!.tag, 'housework');
     },
   );
 

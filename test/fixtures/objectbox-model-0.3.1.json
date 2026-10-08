@@ -550,81 +550,10 @@
         }
       ],
       "relations": []
-    },
-    {
-      "id": "10:4675476530381238902",
-      "lastPropertyId": "5:7533323827786907884",
-      "name": "TagDefinition",
-      "flags": 2,
-      "properties": [
-        {
-          "id": "1:278494581196598870",
-          "name": "id",
-          "type": 6,
-          "flags": 1
-        },
-        {
-          "id": "2:7612704352828458977",
-          "name": "name",
-          "indexId": "32:8363882803295188346",
-          "type": 9,
-          "flags": 32808
-        },
-        {
-          "id": "3:6349472329315341493",
-          "name": "description",
-          "type": 9
-        },
-        {
-          "id": "4:7280173833089258787",
-          "name": "createdAt",
-          "type": 10
-        },
-        {
-          "id": "5:7533323827786907884",
-          "name": "updatedAt",
-          "type": 10
-        }
-      ],
-      "relations": []
-    },
-    {
-      "id": "11:6621983207442784053",
-      "lastPropertyId": "4:5231814236138763969",
-      "name": "TagAlias",
-      "flags": 2,
-      "properties": [
-        {
-          "id": "1:5637718193947917552",
-          "name": "id",
-          "type": 6,
-          "flags": 1
-        },
-        {
-          "id": "2:4851290316510130615",
-          "name": "name",
-          "indexId": "33:7142271812738074144",
-          "type": 9,
-          "flags": 32808
-        },
-        {
-          "id": "3:1055239682740896844",
-          "name": "tag",
-          "indexId": "34:5402044076320548284",
-          "type": 9,
-          "flags": 8
-        },
-        {
-          "id": "4:5231814236138763969",
-          "name": "createdAt",
-          "type": 10
-        }
-      ],
-      "relations": []
     }
   ],
-  "lastEntityId": "11:6621983207442784053",
-  "lastIndexId": "34:5402044076320548284",
+  "lastEntityId": "9:8094921654310938506",
+  "lastIndexId": "31:8201272485164127439",
   "lastRelationId": "1:7448594369450009005",
   "lastSequenceId": "0:0",
   "modelVersion": 5,

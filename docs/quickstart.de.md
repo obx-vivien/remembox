@@ -124,6 +124,39 @@ gehen die anderen Einträge verloren.
 Speichern, dann Claude Desktop **komplett beenden und neu starten**
 (`⌘Q`, nicht nur das Fenster schließen).
 
+**Optional: Projektnamen und Tags vom Server durchsetzen lassen.**
+Standardmäßig wird ein neuer Projektname beim ersten Schreiben registriert
+(geloggt), ein neuer Tag einfach angelegt – nichts wird abgelehnt,
+Warnungen nur bei Schreibvarianten und zusammengeführten Projektnamen. Im
+strikten Registermodus lehnt RememBox einen Schreibvorgang mit einem
+Projekt oder Tag ab, das du noch nicht angelegt hast (mit `project_set`
+bzw. `tag_define`) – so kann keine Sitzung eine neue Schreibweise
+erfinden. Zum Einschalten die Einstellung bei der Registrierung
+mitgeben – für Claude Code (ist RememBox schon registriert, zuerst
+`claude mcp remove remembox --scope user`, dann):
+
+```bash
+claude mcp add remembox --scope user -e OBX_MEMORY_REGISTRY_MODE=strict -- ~/remembox/dist/remembox
+```
+
+Für die Desktop-App einen `env`-Eintrag neben `command` ergänzen, dann
+Claude Desktop komplett beenden und neu starten (`⌘Q`):
+
+```json
+"remembox": {
+  "command": "/pfad/zu/remembox/dist/remembox",
+  "env": { "OBX_MEMORY_REGISTRY_MODE": "strict" }
+}
+```
+
+Im strikten Modus legt Claude das Projekt (`project_set`) vor dem ersten
+Speichern an – dieser zusätzliche Schritt ist gewollt. Nimm in jeder
+verbundenen App dieselbe Einstellung. Bei einem ganz neuen
+Gedächtnis kannst du sie sofort einschalten; bei einem bestehenden zuerst
+die Checkliste im
+[Nutzungshandbuch](usage-guide.md#strict-registry-mode) (auf Englisch)
+abarbeiten.
+
 ## Schritt 5: Die Regeln in jeder Sitzung laden lassen
 
 Dieser Schritt macht RememBox erst verlässlich, bitte nicht überspringen.
@@ -151,17 +184,29 @@ jedes Mal geladen wird:
   wenn du beides nutzt, trag den Block also an beiden Stellen ein.
 
 ```text
-Gedächtnis (RememBox): Vor jeder nicht-trivialen Aufgabe zuerst recall aufrufen, Ergebnisse danach speichern. `project` ist Pflicht und stammt aus einer festen Namensliste – z. B. familie, privat, katzen, firma1, firma2, finanzen (durch deine eigene Liste ersetzen). Bevor du einen neuen Projektnamen benutzt, ruf areas_list auf und nimm einen vorhandenen. Exakte Werte, die sich mit der Zeit ändern (eine Miete, eine Adresse, eine Stufe), gehören in fact_set, alles andere in remember. Tags: camelCase, 3–5 pro Eintrag, vorher tags_list prüfen; nie einen Projektnamen, einen Bereichsnamen oder eine Kennung als Tag verwenden. Pflege-Werkzeuge (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) nur, wenn ich es ausdrücklich verlange.
+Gedächtnis (RememBox): Zu Beginn jeder Sitzung zuerst meine Cockpit-Datei (cockpit.md) lesen. Vor jeder nicht trivialen Aufgabe zuerst recall, Ergebnisse danach speichern. `project` ist Pflicht und hat feste Namen – z. B. family, private, cats, company1, company2, finances (durch die eigene Liste ersetzen). Projektnamen und Tags kommen aus einem Register: zuerst nachschlagen (areas_list, tags_list) und einen vorhandenen Namen nehmen; passt keiner, den neuen zuerst mit einem Satz Beschreibung anlegen (project_set bzw. tag_define), dann benutzen – nie Schreibvarianten erfinden. Exakte, veränderliche Werte (eine Miete, eine Adresse, eine Stufe) mit fact_set, alles andere mit remember. Tags: camelCase, 3–5 pro Eintrag; nie ein Projektname, Bereichsname oder eine Kennung. Nach jedem remember oder supersede den neuen Eintrag mit den zugehörigen Einträgen verknüpfen (das Ergebnis nennt Kandidaten unter related; link oder links bei remember). Wartungswerkzeuge (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) nur auf meine ausdrückliche Bitte.
 ```
 
-Ersetze die Projektliste (`familie, privat, …`) durch deine eigene –
+Ersetze die Projektliste (`family, private, …`) durch deine eigene –
 kurze, feste Namen für die Lebens- und Arbeitsbereiche, die du getrennt
-halten willst. Halte den Block kurz, denn er wird in jeden Chat geladen,
-und halte beide Stellen identisch, sobald du die Liste änderst. Änderungen
-gelten verlässlich für neue Sitzungen – nach dem Bearbeiten einen neuen
-Chat beginnen. Die Einzelheiten stehen im
+halten willst. Der erste Satz meint eine kleine `cockpit.md` mit dem
+aktuellen Stand deiner Themen (die Ebene „Now“ im
+[Nutzungshandbuch](usage-guide.md#1-the-cockpit-what-matters-right-now)) –
+lass ihn weg, wenn du keine führst. Halte den Block kurz, denn er wird in
+jeden Chat geladen, und halte beide Stellen identisch, sobald du die Liste
+änderst. Änderungen gelten verlässlich für neue Sitzungen – nach dem
+Bearbeiten einen neuen Chat beginnen. Die Einzelheiten stehen im
 [Nutzungshandbuch](usage-guide.md#6-making-the-rules-load-every-time)
 (auf Englisch).
+
+Fertige Dateien liegen im Ordner `templates` des entpackten
+`remembox`-Ordners, alle auf Englisch: `instructions-for-claude.md`
+(dieser Block), `global-CLAUDE.md` (eine ausführlichere Fassung für
+`~/.claude/CLAUDE.md`, nur Claude Code) und `cockpit.md` (ein
+Beispiel-Cockpit zum Anpassen). Lege dein Cockpit an einem festen Ort
+ab und ersetze `cockpit.md` im Block durch seinen vollständigen Pfad.
+Programme mit Zugriff auf lokale Dateien (Claude Code, Cowork) lesen es
+dann zu Beginn jeder Sitzung; die Web- und Mobil-Apps können das nicht.
 
 ## Schritt 6: Funktionstest 🎉
 
