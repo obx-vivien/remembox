@@ -9,11 +9,17 @@
 //
 //   A. Fresh install – the new launcher on an empty store directory.
 //   B. Upgrade – the PREVIOUS release's launcher creates a store and writes
-//      entries with legacy tag spellings, then the new launcher opens the
-//      same directory. Finally the previous launcher is pointed at the
+//      entries with legacy tag spellings and 0.4-style marker tags
+//      (deadEnd, status, learning with the alias takeaway, one child
+//      link), then the new launcher opens the same directory – first in
+//      open, then in strict registry mode, where the markers are retired
+//      and migrated to kinds. Finally the previous launcher is pointed at the
 //      upgraded store again (it must refuse it, or – when the schema did
 //      not change between the two releases – still open it; which of the
-//      two is expected is an explicit argument, never inferred).
+//      two is expected is an explicit argument, never inferred). Both
+//      scenarios also exercise the 0.5.0 thread tools (thread_update with
+//      a dated state, a note and a version check, thread_get, thread_list,
+//      an idempotent replay).
 //
 // Deliberately dependency-free (dart:io / dart:convert / dart:async only):
 // it runs as `dart tool/release_acceptance.dart …` without `dart pub get`,
@@ -27,8 +33,8 @@
 // or SKIP (scenario not requested). Nothing is dropped silently, and any
 // FAIL / NOT RUN makes the process exit 1.
 //
-// All test data is synthetic (`acme-app`, `garden`, `home`, `work`,
-// `Flat B`, `alice`).
+// All test data is synthetic (`acme-app`, `garden`, `family`, `home`,
+// `work`, `Flat B`, `Bed 1`, `alice`).
 //
 // Needs a local Ollama with the default embedding model – a fresh install
 // embeds through it. Not reachable / model missing is a failure with a
@@ -240,7 +246,8 @@ final class McpSession {
   }
 
   /// Starts [launcher] the way an MCP client does: from a foreign working
-  /// directory, with nothing but the store directory configured. Every
+  /// directory, with nothing but the store directory (and, when given,
+  /// [registryMode]) configured. Every
   /// inherited `OBX_*` variable is removed so a developer's own shell
   /// settings (a sync URL, a forced store mode, a log level) cannot change
   /// what is being accepted – the launcher's own defaults are part of the
@@ -251,12 +258,16 @@ final class McpSession {
     required String storeDir,
     required String cwd,
     required bool strictStdout,
+    String? registryMode,
   }) async {
     final environment = <String, String>{
       for (final entry in Platform.environment.entries)
         if (!entry.key.startsWith('OBX_')) entry.key: entry.value,
       'OBX_MEMORY_DIR': storeDir,
       'OBX_MEMORY_AUTO_PULL': 'false',
+      // The one setting a check may choose on purpose (scenario B's strict
+      // part); everything else stays at the launcher's defaults.
+      'OBX_MEMORY_REGISTRY_MODE': ?registryMode,
     };
     final process = await Process.start(
       launcher,
@@ -731,6 +742,7 @@ Scenario _freshInstall({
   late int gardenEntryId;
   late int firstRentId;
   late int secondRentId;
+  late int deadEndId;
 
   Future<McpSession> start(String label) async {
     final session = await McpSession.start(
@@ -988,6 +1000,72 @@ Scenario _freshInstall({
   });
 
   scenario.check(
+    'remember with kind deadEnd, and list_recent filters by kind',
+    () async {
+      final stored = (await server.call('remember', {
+        'text':
+            'Watering the tomatoes by hand every evening was dropped: it '
+            'took too long in July.',
+        'project': 'garden',
+        'kind': 'deadEnd',
+      })).ok;
+      deadEndId = stored['id'] as int;
+      final deadEnds = (await server.call('list_recent', {
+        'kind': 'deadEnd',
+      })).ok;
+      _expectEquals(
+        [
+          for (final e in _objects(deadEnds['entries'], 'list_recent entries'))
+            e['id'],
+        ],
+        [deadEndId],
+        'list_recent kind=deadEnd ids',
+      );
+      final facts = (await server.call('list_recent', {'kind': 'fact'})).ok;
+      _expectEquals(
+        [
+          for (final e in _objects(facts['entries'], 'list_recent entries'))
+            e['id'],
+        ]..sort(),
+        [acmeEntryId, gardenEntryId]..sort(),
+        'list_recent kind=fact ids',
+      );
+    },
+  );
+
+  scenario.check('a partOf link shows as hasPart on the whole', () async {
+    final planId =
+        (await server.call('remember', {
+              'text': 'The garden plan for this year has three beds.',
+              'project': 'garden',
+            })).ok['id']
+            as int;
+    final bedId =
+        (await server.call('remember', {
+              'text': 'Bed 1 of the garden plan gets tomatoes and basil.',
+              'project': 'garden',
+            })).ok['id']
+            as int;
+    final link = (await server.call('link', {
+      'fromId': bedId,
+      'toId': planId,
+      'type': 'partOf',
+    })).ok;
+    final whole = _objects(
+      (await server.call('get', {'id': planId})).ok['links'],
+      'get links (whole)',
+    );
+    _expectEquals(whole.single['linkId'], link['linkId'], 'linkId (whole)');
+    _expectEquals(whole.single['relation'], 'hasPart', 'relation (whole)');
+    _expectEquals(whole.single['otherId'], bedId, 'otherId (whole)');
+    final part = _objects(
+      (await server.call('get', {'id': bedId})).ok['links'],
+      'get links (part)',
+    );
+    _expectEquals(part.single['relation'], 'partOf', 'relation (part)');
+  });
+
+  scenario.check(
     'tags_list shows the normalised tags with their counts',
     () async {
       _expectEquals(await _tagCounts(server), {
@@ -1007,16 +1085,18 @@ Scenario _freshInstall({
       server = await start('new launcher (fresh store, restarted)');
       await server.initialize();
       final stats = (await server.call('stats')).ok;
-      _expectHealthyStats(stats, entries: 2);
+      _expectHealthyStats(stats, entries: 5);
       _expectEquals(_at(stats, 'store.tags'), 2, 'stats store.tags');
       _expectEquals(_at(stats, 'byProject'), {
         'acme-app': 1,
-        'garden': 1,
+        'garden': 4,
       }, 'stats byProject');
       _expectEquals(_at(stats, 'byArea'), {
         'work': 1,
-        'home': 1,
+        'home': 4,
       }, 'stats byArea');
+      _expectEquals(_at(stats, 'byKind.deadEnd'), 1, 'stats byKind.deadEnd');
+      _expectEquals(_at(stats, 'store.memoryLinks'), 1, 'stats memoryLinks');
       _expectEquals(_at(stats, 'registry.projects'), 2, 'stats projects');
       _expectEquals(_at(stats, 'registry.areas'), 2, 'stats areas');
       _expectEquals(
@@ -1035,7 +1115,321 @@ Scenario _freshInstall({
     },
   );
 
+  // 0.5.0 threads: create with a date, a note with a real embedding, the
+  // history in thread_get, thread_list, the version check and the
+  // idempotent replay.
+  late int threadId;
+  late int noteId;
+  scenario.check('thread_update creates a thread with eventAt', () async {
+    server = await start('new launcher (threads)');
+    await server.initialize();
+    final created = (await server.call('thread_update', {
+      'title': 'Website relaunch',
+      'project': 'acme-app',
+      'state': 'inProgress',
+      'eventAt': '2026-10-01',
+    })).ok;
+    _expectEquals(created['action'], 'created', 'thread_update action');
+    _expectEquals(created['since'], '2026-10-01T00:00:00.000Z', 'since');
+    _expectEquals(created['version'], 1, 'version');
+    threadId = created['threadId'] as int;
+  });
+
+  scenario.check(
+    'thread_update with a note stores an indexed snapshot; thread_get shows '
+    'the entry and the history',
+    () async {
+      final updated = (await server.call('thread_update', {
+        'threadId': threadId,
+        'state': 'waiting',
+        'note': 'The staging site is online; waiting for the copy texts.',
+      })).ok;
+      _expectEquals(updated['action'], 'updated', 'thread_update action');
+      _expectEquals(updated['version'], 2, 'version');
+      final note = updated['note'] as Map<String, Object?>;
+      _expectEquals(note['indexed'], true, 'note indexed (real embedding)');
+      noteId = note['id'] as int;
+      final got = (await server.call('thread_get', {'threadId': threadId})).ok;
+      _expectEquals(got['state'], 'waiting', 'thread_get state');
+      _expectEquals(
+        [
+          for (final h in _objects(got['history'], 'thread_get history'))
+            h['state'],
+        ],
+        ['inProgress', 'waiting'],
+        'thread_get history',
+      );
+      final entries = _objects(got['entries'], 'thread_get entries');
+      _expectEquals(entries.single['id'], noteId, 'thread_get entry id');
+      _expectEquals(entries.single['kind'], 'snapshot', 'thread_get kind');
+      final hits = (await server.call('recall', {
+        'query': 'staging site copy texts',
+        'project': 'acme-app',
+      })).ok;
+      _expect(
+        _objects(hits['hits'], 'recall hits').any((h) => h['id'] == noteId),
+        'recall should find the thread note $noteId',
+      );
+    },
+  );
+
+  scenario.check('thread_list lists the thread with its entry count', () async {
+    final listed = (await server.call('thread_list', {
+      'project': 'acme-app',
+    })).ok;
+    final rows = _objects(listed['threads'], 'thread_list threads');
+    _expectEquals(rows.single['id'], threadId, 'thread_list id');
+    _expectEquals(rows.single['entryCount'], 1, 'thread_list entryCount');
+  });
+
+  scenario.check(
+    'a stale expectedVersion is rejected with version_conflict',
+    () async {
+      final outcome = await server.call('thread_update', {
+        'threadId': threadId,
+        'state': 'done',
+        'expectedVersion': 1,
+      });
+      _expect(outcome.isError, 'thread_update should have been rejected');
+      _expectEquals(outcome.payload['error'], 'version_conflict', 'error');
+      _expectEquals(
+        _at(outcome.payload, 'current.version'),
+        2,
+        'version_conflict current.version',
+      );
+    },
+  );
+
+  scenario.check(
+    'a retry with the same idempotencyKey is replayed; stats counts the '
+    'thread',
+    () async {
+      final args = {
+        'threadId': threadId,
+        'state': 'inProgress',
+        'idempotencyKey': 'acceptance-retry-1',
+      };
+      final first = (await server.call('thread_update', args)).ok;
+      final again = (await server.call('thread_update', args)).ok;
+      _expectEquals(again['replayed'], true, 'replayed');
+      _expectEquals(again['version'], first['version'], 'replayed version');
+      final stats = (await server.call('stats')).ok;
+      _expectEquals(_at(stats, 'threads.total'), 1, 'stats threads.total');
+      _expectEquals(_at(stats, 'threads.live'), 1, 'stats threads.live');
+      _expectEquals(
+        _at(stats, 'threads.threadEntries'),
+        1,
+        'stats threads.threadEntries',
+      );
+      _expectEquals(
+        _at(stats, 'threads.idempotencyRows'),
+        1,
+        'stats threads.idempotencyRows',
+      );
+      await server.closeCleanly();
+    },
+  );
+
+  // The shipped launcher's `cockpit-sync` subcommand: parse the shipped
+  // template, then one real sync against this scenario's (closed) store.
+  final template = '${File(options.newLauncher).parent.parent.path}'
+      '/templates/cockpit.md';
+  scenario.check(
+    'cockpit-sync --parse-only reads the shipped cockpit template',
+    () async {
+      final run = await _runCockpitSync(
+        options.newLauncher,
+        ['--parse-only', '--cockpit', template],
+        storeDir: storeDir,
+        cwd: cwd,
+      );
+      _expectEquals(run.exitCode, 0, 'cockpit-sync --parse-only exit code');
+      final json = run.lastJsonLine;
+      _expect(json != null, 'no JSON on stdout: ${run.stdout}');
+      _expect(
+        (json!['parsed'] as int) > 0,
+        'the template should yield thread lines, got ${json['parsed']}',
+      );
+      _expectEquals(json['unparsed'], 0, 'unparsed template lines');
+    },
+  );
+
+  scenario.check(
+    'cockpit-sync renders the store\'s live threads into a cockpit copy',
+    () async {
+      final copy = File('$cwd/cockpit.md')
+        ..writeAsStringSync(File(template).readAsStringSync());
+      final run = await _runCockpitSync(
+        options.newLauncher,
+        ['--cockpit', copy.path],
+        storeDir: storeDir,
+        cwd: cwd,
+      );
+      _expectEquals(
+        run.exitCode,
+        0,
+        'cockpit-sync exit code (stderr: ${run.stderr})',
+      );
+      final text = copy.readAsStringSync();
+      _expect(
+        text.contains('### acme-app') && text.contains('**Website relaunch**'),
+        'the generated section should list the acme-app thread',
+      );
+      _expect(
+        File('$cwd/cockpit-logs/cockpit-compare.log').existsSync(),
+        'the compare log should have been written',
+      );
+    },
+  );
+
+  // The Claude Code hook script shipped next to dist/ (hooks/): a ZIP user
+  // never clones the repository, so this is the only copy they get. It must
+  // find ../dist/remembox by itself (REMEMBOX_BIN is NOT set here).
+  final hook = '${File(options.newLauncher).parent.parent.path}'
+      '/hooks/cockpit-sync-hook.sh';
+  scenario.check('hooks/cockpit-sync-hook.sh is shipped and executable', () async {
+    final file = File(hook);
+    _expect(file.existsSync(), 'the zip has no hooks/cockpit-sync-hook.sh');
+    _expect(
+      file.statSync().mode & 0x40 != 0,
+      'hooks/cockpit-sync-hook.sh is not executable (mode '
+      '${file.statSync().mode.toRadixString(8)})',
+    );
+  });
+
+  scenario.check(
+    'the hook unconfigured (no OBX_MEMORY_COCKPIT_FILE, stdin closed): exit 0, '
+    'silent, nothing logged',
+    () async {
+      final run = await _runHook(
+        hook,
+        cwd: cwd,
+        label: 'unconfigured',
+        env: const {},
+      );
+      _expectEquals(run.exitCode, 0, 'hook exit code');
+      _expectEquals(run.stdout, '', 'hook stdout');
+      _expectEquals(run.stderr, '', 'hook stderr');
+      _expect(
+        !File(run.logPath).existsSync(),
+        'an unconfigured hook must not write the compare log (${run.logPath})',
+      );
+      _expect(
+        Directory(run.home).listSync(recursive: true).isEmpty,
+        'an unconfigured hook must not write anything below HOME',
+      );
+    },
+  );
+
+  scenario.check(
+    'the hook configured, REMEMBOX_BIN unset: finds ../dist/remembox and '
+    'renders the cockpit',
+    () async {
+      final copy = File('$cwd/cockpit-hook.md')
+        ..writeAsStringSync(File(template).readAsStringSync());
+      final run = await _runHook(
+        hook,
+        cwd: cwd,
+        label: 'configured',
+        env: {
+          'OBX_MEMORY_DIR': storeDir,
+          'OBX_MEMORY_COCKPIT_FILE': copy.path,
+        },
+      );
+      _expectEquals(run.exitCode, 0, 'hook exit code');
+      _expectEquals(run.stdout, '', 'hook stdout');
+      _expectEquals(run.stderr, '', 'hook stderr');
+      final log = File(run.logPath);
+      _expect(
+        !log.existsSync() || !log.readAsStringSync().contains('hook-failure'),
+        'the hook logged a failure: ${log.existsSync() ? log.readAsStringSync() : ''}',
+      );
+      final text = copy.readAsStringSync();
+      _expect(
+        text.contains('### acme-app') && text.contains('**Website relaunch**'),
+        'the hook should have rendered the acme-app thread into the cockpit',
+      );
+    },
+  );
+
   return scenario;
+}
+
+/// One run of the shipped hook script, executed directly (shebang and mode
+/// bit are part of what is tested), stdin closed, in a bare environment:
+/// PATH, a HOME inside [cwd]/hook-home-[label] and the compare log inside
+/// it – no REMEMBOX_BIN, no inherited OBX_*, so nothing but the script's
+/// own location can lead it to the launcher.
+Future<({int exitCode, String stdout, String stderr, String logPath, String home})>
+_runHook(
+  String hook, {
+  required String cwd,
+  required String label,
+  required Map<String, String> env,
+}) async {
+  final home = Directory('$cwd/hook-home-$label')..createSync(recursive: true);
+  final logPath = '${home.path}/compare.log';
+  final result = await Process.run(
+    '/bin/bash',
+    ['-c', '"\$0" </dev/null', hook],
+    workingDirectory: cwd,
+    includeParentEnvironment: false,
+    environment: {
+      'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
+      'HOME': home.path,
+      'OBX_MEMORY_COCKPIT_LOG': logPath,
+      ...env,
+    },
+  ).timeout(_requestTimeout);
+  return (
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+    logPath: logPath,
+    home: home.path,
+  );
+}
+
+/// One run of the launcher's `cockpit-sync` subcommand with a clean
+/// environment (no inherited OBX_*), the scenario's store and a compare
+/// log inside [cwd].
+Future<({int exitCode, String stdout, String stderr, Map<String, Object?>? lastJsonLine})>
+_runCockpitSync(
+  String launcher,
+  List<String> args, {
+  required String storeDir,
+  required String cwd,
+}) async {
+  final environment = <String, String>{
+    for (final entry in Platform.environment.entries)
+      if (!entry.key.startsWith('OBX_')) entry.key: entry.value,
+    'OBX_MEMORY_DIR': storeDir,
+    'OBX_MEMORY_COCKPIT_LOG': '$cwd/cockpit-logs/cockpit-compare.log',
+  };
+  final result = await Process.run(
+    launcher,
+    ['cockpit-sync', ...args],
+    workingDirectory: cwd,
+    environment: environment,
+    includeParentEnvironment: false,
+  ).timeout(_requestTimeout);
+  final out = result.stdout.toString();
+  Map<String, Object?>? json;
+  for (final line in out.split('\n').reversed) {
+    if (!line.trim().startsWith('{')) continue;
+    try {
+      json = jsonDecode(line.trim()) as Map<String, Object?>;
+      break;
+    } on FormatException {
+      continue;
+    }
+  }
+  return (
+    exitCode: result.exitCode,
+    stdout: out,
+    stderr: result.stderr.toString(),
+    lastJsonLine: json,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1444,25 @@ const _normalisedTagCounts = {'buildNotes': 3, 'alice': 2, 'plantCare': 1};
 final _refusalMessage = RegExp(
   r"DB's last entity ID (\d+) is higher than (\d+) from model",
 );
+
+/// The marker tags the previous release writes (0.4-style: tags that 0.5.0
+/// turned into kinds or retires) – already normalised, so tags_normalize
+/// leaves them alone.
+const _markerTags = {'deadEnd', 'status', 'learning'};
+
+/// The numeric last entity id of the model next to [serverSourcePath]
+/// (`lib/src/server.dart` -> `lib/objectbox-model.json`) – what the store
+/// reports after the new release opened it.
+int _currentLastEntityId(String serverSourcePath) {
+  final model = File(
+    '${File(serverSourcePath).parent.parent.path}/objectbox-model.json',
+  );
+  if (!model.existsSync()) {
+    throw CheckFailure('no model file at ${model.path}');
+  }
+  final json = jsonDecode(model.readAsStringSync()) as Map<String, Object?>;
+  return int.parse((json['lastEntityId'] as String).split(':').first);
+}
 
 Scenario _upgrade({
   required Report report,
@@ -1066,6 +1479,9 @@ Scenario _upgrade({
   late Set<String> tagsStoredByPrevious;
   late List<int> previousEntryIds;
   late int unregisteredBeforeReindex;
+  // The 0.4-style marker entries: tag name -> entry id.
+  final markerIds = <String, int>{};
+  late int childLinkId;
 
   /// The entries the previous release writes – three spellings of one tag,
   /// two of another, and one with a space.
@@ -1091,6 +1507,7 @@ Scenario _upgrade({
     String label,
     String launcher, {
     required bool strict,
+    String? registryMode,
   }) async {
     final session = await McpSession.start(
       label: label,
@@ -1098,15 +1515,40 @@ Scenario _upgrade({
       storeDir: storeDir,
       cwd: cwd,
       strictStdout: strict,
+      registryMode: registryMode,
     );
     scenario.sessions.add(session);
     return session;
   }
 
+  /// The marker entries (project `family`): an episode tagged deadEnd, a
+  /// fact tagged status and a decision tagged learning.
+  const markerEntries = [
+    (
+      tag: 'deadEnd',
+      kind: 'episode',
+      text:
+          'Covering the beds with black foil was dropped: the soil got too '
+          'hot for the seedlings.',
+    ),
+    (
+      tag: 'status',
+      kind: 'fact',
+      text: 'Family garden status in May: two beds planted, one waits.',
+    ),
+    (
+      tag: 'learning',
+      kind: 'decision',
+      text: 'Water the beds in the morning, not in the evening, from now on.',
+    ),
+  ];
+  final entriesWritten = legacyEntries.length + markerEntries.length;
+
   /// The tag names the upgrade still has to fold.
   List<String> legacySpellings() =>
       tagsStoredByPrevious
           .difference(_normalisedTagCounts.keys.toSet())
+          .difference(_markerTags)
           .toList()
         ..sort();
 
@@ -1152,8 +1594,40 @@ Scenario _upgrade({
           _sortedStrings(read['tags'], 'stored tags'),
         );
       }
+      // 0.4-style markers: registered tags (learning with the alias
+      // takeaway), one entry per marker, one child link. Needs a previous
+      // release with tag_define (0.4.0 or later).
+      for (final (name, description, aliases) in [
+        ('status', 'A dated status report.', const <String>[]),
+        ('learning', 'Something learned.', const ['takeaway']),
+        ('deadEnd', 'A dropped approach.', const <String>[]),
+      ]) {
+        (await previous.call('tag_define', {
+          'name': name,
+          'description': description,
+          if (aliases.isNotEmpty) 'aliases': aliases,
+        })).ok;
+      }
+      for (final marker in markerEntries) {
+        final stored = (await previous.call('remember', {
+          'text': marker.text,
+          'project': 'family',
+          'kind': marker.kind,
+          'tags': [marker.tag],
+        })).ok;
+        _expectEquals(stored['indexed'], true, 'previous remember indexed');
+        markerIds[marker.tag] = stored['id'] as int;
+        tagsStoredByPrevious.add(marker.tag);
+      }
+      childLinkId =
+          (await previous.call('link', {
+                'fromId': markerIds['status'],
+                'toId': markerIds['deadEnd'],
+                'type': 'child',
+              })).ok['linkId']
+              as int;
       previousStats = (await previous.call('stats')).ok;
-      _expectHealthyStats(previousStats, entries: legacyEntries.length);
+      _expectHealthyStats(previousStats, entries: entriesWritten);
       stdout.writeln(
         '   tags as stored by $previousVersion: '
         '${tagsStoredByPrevious.toList()..sort()}',
@@ -1192,7 +1666,7 @@ Scenario _upgrade({
         'serverInfo.version',
       );
       final stats = (await server.call('stats')).ok;
-      _expectHealthyStats(stats, entries: legacyEntries.length);
+      _expectHealthyStats(stats, entries: entriesWritten);
       _expectEquals(
         _at(stats, 'store.tags'),
         _at(previousStats, 'store.tags'),
@@ -1201,12 +1675,13 @@ Scenario _upgrade({
       _expectEquals(_at(stats, 'byProject'), {
         'acme-app': 2,
         'garden': 1,
+        'family': 3,
       }, 'stats byProject');
       unregisteredBeforeReindex =
           _at(stats, 'registry.unregisteredProjects') as int;
       _expectEquals(
         unregisteredBeforeReindex + (_at(stats, 'registry.projects') as int),
-        2,
+        3,
         'registered + unregistered projects',
       );
     },
@@ -1243,12 +1718,8 @@ Scenario _upgrade({
     'reindex keeps every vector and registers the projects',
     () async {
       final reindex = (await server.call('reindex')).ok;
-      _expectEquals(
-        reindex['entriesExamined'],
-        legacyEntries.length,
-        'examined',
-      );
-      _expectEquals(reindex['unchanged'], legacyEntries.length, 'unchanged');
+      _expectEquals(reindex['entriesExamined'], entriesWritten, 'examined');
+      _expectEquals(reindex['unchanged'], entriesWritten, 'unchanged');
       _expectEquals(reindex['created'], 0, 'reindex created');
       _expectEquals(reindex['reembedded'], 0, 'reindex reembedded');
       _expectEquals(reindex['orphanedRowsRemoved'], 0, 'orphanedRowsRemoved');
@@ -1259,7 +1730,7 @@ Scenario _upgrade({
         'reindex registry.registered',
       );
       final stats = (await server.call('stats')).ok;
-      _expectEquals(_at(stats, 'registry.projects'), 2, 'stats projects');
+      _expectEquals(_at(stats, 'registry.projects'), 3, 'stats projects');
       _expectEquals(
         _at(stats, 'registry.unregisteredProjects'),
         0,
@@ -1303,7 +1774,7 @@ Scenario _upgrade({
       _expectEquals(result['skipped'], <Object?>[], '"skipped"');
       _expectEquals(
         await _tagCounts(server),
-        _normalisedTagCounts,
+        {..._normalisedTagCounts, for (final t in _markerTags) t: 1},
         'tags_list after tags_normalize',
       );
       final again = (await server.call('tags_normalize', {'dryRun': true})).ok;
@@ -1346,26 +1817,270 @@ Scenario _upgrade({
     _expectEquals(read.single['value'], 900, 'fact_get value');
   });
 
+  // ---- 0.5.0 in strict registry mode: retire and migrate the markers ----
+
+  const migrationRules = [
+    {
+      'tags': ['deadEnd'],
+      'kind': 'deadEnd',
+    },
+    {
+      'tags': ['learning', 'takeaway'],
+      'kind': 'lesson',
+    },
+    {
+      'tags': ['status'],
+      'kind': 'snapshot',
+    },
+  ];
+
+  scenario.check(
+    'in strict registry mode, tags_list reports the marker named like a '
+    'kind',
+    () async {
+      await server.closeCleanly();
+      server = await start(
+        'new launcher (upgraded store, strict)',
+        options.newLauncher,
+        strict: true,
+        registryMode: 'strict',
+      );
+      await server.initialize();
+      final tags = (await server.call('tags_list')).ok;
+      _expectEquals(tags['registryMode'], 'strict', 'tags_list registryMode');
+      _expectEquals(tags['kindCollisions'], [
+        {'name': 'deadEnd', 'as': 'registeredTag', 'kind': 'deadEnd', 'count': 1},
+      ], 'tags_list kindCollisions');
+      _expect(
+        (tags['warning'] as String? ?? '').contains('kind_migrate'),
+        'tags_list should point at kind_migrate, got: ${tags['warning']}',
+      );
+    },
+  );
+
+  scenario.check('tag_retire retires status and learning with its alias', () async {
+    final status = (await server.call('tag_retire', {
+      'name': 'status',
+      'hint': 'use kind snapshot (and fact_set state on the thread)',
+    })).ok;
+    _expectEquals(status['action'], 'created', 'tag_retire status action');
+    _expectEquals(status['inUse'], {'status': 1}, 'tag_retire status inUse');
+    final learning = (await server.call('tag_retire', {
+      'name': 'learning',
+      'hint': 'use kind lesson',
+    })).ok;
+    _expectEquals(
+      learning['aliasesRetired'],
+      ['takeaway'],
+      'tag_retire learning aliasesRetired',
+    );
+  });
+
+  scenario.check(
+    'remember with the retired alias is rejected with the hint, nothing '
+    'written',
+    () async {
+      final before = _at((await server.call('stats')).ok, 'store.entries');
+      (await server.call('remember', {
+        'text': 'Mulch keeps the beds moist for longer.',
+        'project': 'family',
+        'tags': ['takeaway'],
+      })).expectRejected(
+        '"takeaway" (alias of the retired tag "learning") – use kind lesson',
+      );
+      _expectEquals(
+        _at((await server.call('stats')).ok, 'store.entries'),
+        before,
+        'stats store.entries after the rejection',
+      );
+    },
+  );
+
+  scenario.check(
+    'kind_migrate dry run reports converted, review and legacyLinks; the '
+    'real run matches it',
+    () async {
+      List<Object?> ids(Map<String, Object?> result, String key) => [
+        for (final e in _objects(result[key], 'kind_migrate "$key"')) e['id'],
+      ]..sort((a, b) => (a as int).compareTo(b as int));
+      final dry = (await server.call('kind_migrate', {
+        'rules': migrationRules,
+        'dryRun': true,
+      })).ok;
+      _expectEquals(
+        ids(dry, 'converted'),
+        [markerIds['deadEnd'], markerIds['status']]
+          ..sort((a, b) => a!.compareTo(b!)),
+        'dry run converted ids',
+      );
+      _expectEquals(ids(dry, 'review'), [
+        markerIds['learning'],
+      ], 'dry run review ids');
+      _expectEquals(dry['legacyLinks'], [
+        {
+          'linkId': childLinkId,
+          'type': 'child',
+          'fromId': markerIds['status'],
+          'toId': markerIds['deadEnd'],
+        },
+      ], 'dry run legacyLinks');
+      _expectEquals(dry['notFound'], ['takeaway'], 'dry run notFound');
+      final real = (await server.call('kind_migrate', {
+        'rules': migrationRules,
+      })).ok;
+      for (final key in ['converted', 'review', 'legacyLinks', 'notFound']) {
+        _expectEquals(real[key], dry[key], 'real run "$key"');
+      }
+      _expectEquals(
+        real['tagsNowUnused'],
+        ['deadEnd', 'status'],
+        'tagsNowUnused',
+      );
+      final episode = (await server.call('get', {
+        'id': markerIds['deadEnd'],
+      })).ok;
+      _expectEquals(episode['kind'], 'deadEnd', 'migrated kind');
+      _expectEquals(episode['tags'], <Object?>[], 'migrated tags');
+    },
+  );
+
+  scenario.check(
+    'tag_remove the migrated markers keeps the retirement',
+    () async {
+      final removed = (await server.call('tag_remove', {
+        'tags': ['deadEnd', 'status'],
+      })).ok;
+      _expectEquals(removed['tagsRemoved'], 2, 'tag_remove tagsRemoved');
+      _expectEquals(
+        removed['retirementsKept'],
+        ['status'],
+        'tag_remove retirementsKept',
+      );
+    },
+  );
+
+  scenario.check('recall with kind deadEnd finds the migrated episode', () async {
+    final recall = (await server.call('recall', {
+      'query': 'black foil on the beds',
+      'project': 'family',
+      'kind': 'deadEnd',
+    })).ok;
+    _expectEquals(_hitIds(recall), [markerIds['deadEnd']], 'recall hit ids');
+  });
+
+  scenario.check(
+    'a child link is rejected in strict mode with the partOf hint',
+    () async {
+      (await server.call('link', {
+        'fromId': markerIds['learning'],
+        'toId': markerIds['status'],
+        'type': 'child',
+      })).expectRejected('Use partOf (A belongs to B)');
+    },
+  );
+
+  scenario.check(
+    'attribute_define state, then fact_set rejects a value outside it',
+    () async {
+      final defined = (await server.call('attribute_define', {
+        'attribute': 'state',
+        'description': 'Where a thread stands.',
+        'values': [
+          'backlog',
+          'planned',
+          'inProgress',
+          'waiting',
+          'paused',
+          'done',
+          'dropped',
+        ],
+      })).ok;
+      _expectEquals(defined['action'], 'created', 'attribute_define action');
+      final ok = (await server.call('fact_set', {
+        'project': 'garden',
+        'subject': 'Bed 1',
+        'attribute': 'state',
+        'valueText': 'inProgress',
+      })).ok;
+      _expectEquals(ok['action'], 'created', 'fact_set state action');
+      (await server.call('fact_set', {
+        'project': 'garden',
+        'subject': 'Bed 2',
+        'attribute': 'state',
+        'valueText': 'in progress',
+      })).expectRejected('Did you mean "inProgress"?');
+    },
+  );
+
+  scenario.check(
+    'reindex after the in-place migration re-embeds nothing',
+    () async {
+      final reindex = (await server.call('reindex')).ok;
+      _expectEquals(
+        reindex['unchanged'],
+        reindex['entriesExamined'],
+        'reindex unchanged == entriesExamined',
+      );
+      _expectEquals(reindex['entriesExamined'], entriesWritten + 1, 'examined');
+      _expectEquals(reindex['reembedded'], 0, 'reindex reembedded');
+      _expectEquals(reindex['created'], 0, 'reindex created');
+    },
+  );
+
+  scenario.check(
+    'thread_update works on the upgraded store (strict registry mode)',
+    () async {
+      final created = (await server.call('thread_update', {
+        'title': 'Bed 2 planting',
+        'project': 'garden',
+        'state': 'planned',
+      })).ok;
+      _expectEquals(created['action'], 'created', 'thread_update action');
+      final listed = (await server.call('thread_list', {
+        'project': 'garden',
+      })).ok;
+      _expectEquals(listed['count'], 1, 'thread_list count');
+    },
+  );
+
   void expectFinalStats(Map<String, Object?> stats) {
-    _expectHealthyStats(stats, entries: legacyEntries.length + 1);
-    _expectEquals(_at(stats, 'store.tags'), 4, 'stats store.tags');
+    // The legacy and marker entries plus the compost note.
+    _expectHealthyStats(stats, entries: entriesWritten + 1);
+    // buildNotes, alice, plantCare, yardWork and learning (deadEnd and
+    // status were removed after the migration).
+    _expectEquals(_at(stats, 'store.tags'), 5, 'stats store.tags');
     _expectEquals(_at(stats, 'byProject'), {
       'acme-app': 2,
       'garden': 2,
+      'family': 3,
     }, 'stats byProject');
-    _expectEquals(_at(stats, 'registry.projects'), 2, 'stats projects');
+    _expectEquals(_at(stats, 'byKind.deadEnd'), 1, 'stats byKind.deadEnd');
+    _expectEquals(_at(stats, 'byKind.snapshot'), 1, 'stats byKind.snapshot');
+    _expectEquals(_at(stats, 'byKind.decision'), 1, 'stats byKind.decision');
+    _expectEquals(_at(stats, 'registry.projects'), 3, 'stats projects');
+    _expectEquals(
+      _at(stats, 'registry.tagRetirements'),
+      3,
+      'stats registry.tagRetirements',
+    );
+    _expectEquals(
+      _at(stats, 'registry.attributeDefinitions'),
+      1,
+      'stats registry.attributeDefinitions',
+    );
     _expectEquals(
       _at(stats, 'registry.unregisteredProjects'),
       0,
       'stats unregisteredProjects',
     );
-    _expectEquals(_at(stats, 'facts.total'), 1, 'stats facts.total');
-    _expectEquals(_at(stats, 'facts.current'), 1, 'stats facts.current');
+    _expectEquals(_at(stats, 'facts.total'), 2, 'stats facts.total');
+    _expectEquals(_at(stats, 'facts.current'), 2, 'stats facts.current');
     _expectEquals(
       _at(stats, 'facts.conflictingKeys'),
       0,
       'stats facts.conflictingKeys',
     );
+    _expectEquals(_at(stats, 'threads.total'), 1, 'stats threads.total');
   }
 
   scenario.check(
@@ -1420,6 +2135,19 @@ Scenario _upgrade({
           '${previous.stderrTail()}',
         );
         stdout.writeln('   $previousVersion said: "${match!.group(0)}"');
+        // The store now carries this release's model (0.5.0: 18 entities);
+        // the previous model knows fewer (0.4.0: 11).
+        final current = _currentLastEntityId(options.serverSource);
+        _expectEquals(
+          int.parse(match.group(1)!),
+          current,
+          'last entity id of the upgraded store',
+        );
+        _expect(
+          int.parse(match.group(2)!) < current,
+          'the previous model\'s last entity id ${match.group(2)} should be '
+          'below $current',
+        );
       },
     );
   } else {

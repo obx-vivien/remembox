@@ -11,7 +11,7 @@
 /// Also covers `tag_define` (2026-10-06, tag registry) and one strict
 /// registry mode rejection over the wire.
 ///
-/// Synthetic data only: project `home`, tags `alice`, `bob`, `lesson`,
+/// Synthetic data only: project `home`, tags `alice`, `bob`, `insight`,
 /// `appsScript`.
 library;
 
@@ -366,7 +366,7 @@ void main() {
     });
 
     test('bad input surfaces as invalid_input', () async {
-      final r = await callInvalid('tag_define', {'name': 'lesson'});
+      final r = await callInvalid('tag_define', {'name': 'insight'});
       expect(r['message'], contains('a description is required'));
     });
 
@@ -375,7 +375,7 @@ void main() {
       // validation (additionalProperties: false) rejects the call before
       // the handler runs.
       final result = await call('tag_define', {
-        'name': 'lesson',
+        'name': 'insight',
         'descripton': 'Misspelled key.',
       });
       expect(result.isError, isTrue);
@@ -433,7 +433,7 @@ void main() {
         arguments: {
           'text': 'strict probe',
           'project': 'home',
-          'tags': ['lesson'],
+          'tags': ['insight'],
         },
       ),
     );
@@ -442,7 +442,7 @@ void main() {
     expect(json['error'], 'invalid_input');
     expect(
       json['message'],
-      contains('tag(s) not registered (strict registry mode): "lesson"'),
+      contains('tag(s) not registered (strict registry mode): "insight"'),
     );
     expect(testGate.store.box<MemoryEntry>().count(), 0);
   });

@@ -66,6 +66,11 @@ ulimit -n 1048576 2>/dev/null || ulimit -n 10240 2>/dev/null || true
 # before invoking this launcher to see more or less.
 export OBX_LOG_LEVEL="${OBX_LOG_LEVEL:-error}"
 
+# `remembox cockpit-sync` resolves relative paths (--cockpit,
+# OBX_MEMORY_COCKPIT_FILE, OBX_MEMORY_COCKPIT_LOG) against the directory the
+# launcher was started from – it is lost by the cd below, so pass it on.
+export REMEMBOX_CALLER_CWD="${REMEMBOX_CALLER_CWD:-$PWD}"
+
 cd "$(dirname "$0")" && exec ./bin/remembox "$@"
 EOF
 chmod +x dist/remembox

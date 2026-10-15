@@ -4,7 +4,7 @@ description: >-
   Persistent memory for every conversation, via the RememBox MCP server.
   Use at the START of any substantive task to recall stored context about
   the user, their projects, past decisions, and known pitfalls – and at the
-  END of completed work to store new decisions, learnings, and status.
+  END of completed work to store new decisions, lessons, dead ends and status.
   Trigger whenever the user references earlier work ("as we discussed",
   "my project", "last time"), asks you to remember or recall something, or
   when knowing their preferences and history would change your answer –
@@ -16,7 +16,7 @@ description: >-
 You have durable memory across sessions through the RememBox tools
 (`recall`, `remember`, `supersede`, `forget`, `get`, `link`, `unlink`,
 `list_recent`, `stats`, `reindex`), plus dedicated tooling for areas,
-structured facts, and tags described below.
+threads, structured facts, and tags described below.
 Everything you don't store is gone when the session ends – so retrieval and
 storage are part of the work, not an afterthought.
 
@@ -46,8 +46,12 @@ probably an older state of what you just wrote: `supersede` it (prose) or
 `fact_set` (one exact value) instead of leaving two versions. Other items:
 if it is another thing that belongs with the new entry, link it – with
 `link`, or by passing `links` (`toId`, `type`, optional `note`) in the
-`remember` call itself. Always link people, cases and objects that already
-have entries. An item marked `weak: true` is only a possible predecessor –
+`remember` call itself (the new entry is then A). Directions are fixed –
+for `link(fromId: A, toId: B, type)`: `derivedFrom` – A follows from B;
+`contradicts` – A contradicts B; `partOf` – A belongs to B (`get` shows it
+as `hasPart` on B); `related` – undirected. `parent`/`child` are legacy
+(no direction) – use `partOf`; strict mode rejects them. Always link
+people, cases and objects that already have entries. An item marked `weak: true` is only a possible predecessor –
 check it before linking. If `relatedMore` is present, further candidates were not shown
 (with `relatedMoreIsLowerBound: true` the number is only a minimum and may be 0) – `recall`
 lists them all.
@@ -56,18 +60,24 @@ lists them all.
 
 - **Decisions** – with date and the *why*. The reasoning is what prevents the
   same debate from being rerun in three months.
-- **Learnings from failures** – what was tried, why it failed, and the fix
-  that actually worked. This is the highest-value memory type: it converts
-  paid-for pain into a permanent shortcut.
-- **Project status** – where things stand, what's next, what's blocked.
-  Store as kind `fact`; supersede the previous status entry rather than
-  piling up snapshots.
+- **Dead ends and lessons** – what was tried and why it was dropped (kind
+  `deadEnd`), and what to apply next time (kind `lesson`). This is the
+  highest-value memory type: it converts paid-for pain into a permanent
+  shortcut. Before a new attempt at a known problem, `list_recent` with
+  `kind: "deadEnd"` and the `project` lists the earlier ones.
+- **Status of a thread** – a status change is ONE call: `thread_update`
+  (state, `eventAt` when the date is known, optional `note`), which keeps
+  every earlier state as history. A dated report (where things stand,
+  what's next, what's blocked) is kind `snapshot` – the `note` of
+  `thread_update`, or `remember(kind: "snapshot", threadId)`. See
+  "Threads" below.
 - **User preferences** – tone, tools, workflows, standing constraints
   ("never auto-send emails"). These apply to every future session.
 
-An exact value that can change – an amount, an address, a status/stage, an
+An exact value that can change – an amount, an address, a stage, an
 identifier, a measurement – is usually a **structured fact**, not a
-`remember` call; see "Structured facts" below.
+`remember` call; see "Structured facts" below. The state of a thread is
+not a fact: it belongs to `thread_update`.
 
 ## What never to store
 
@@ -86,16 +96,20 @@ When in doubt whether something is too sensitive to store, ask the user.
 
 ## Kinds and project
 
-Every memory takes a `kind` parameter – one of exactly: `fact`, `decision`,
-`preference`, `episode`, `reference`. Any other value is rejected with a
-validation error, so never invent kinds.
+Every memory takes a `kind` parameter – one of exactly eight. Any other
+value is rejected with a validation error, so never invent kinds, and say
+what an entry is with its kind, not with a tag (a tag equal to a kind name
+is dropped).
 
+- `fact` – stable knowledge about people, projects, systems
 - `decision` – choices made, with rationale
-- `episode` – something that happened: a failure, a fix, a notable event
 - `preference` – how the user likes to work; standing constraints
-- `fact` – stable knowledge about people, projects, systems; also project
-  status (supersede the old status entry instead of piling up snapshots)
+- `episode` – something that happened: an incident, a fix, a notable event
 - `reference` – pointers to external resources (URLs, dashboards, tickets)
+- `snapshot` – a dated status report on a thread (its current state is
+  set with `thread_update`)
+- `lesson` – what to apply next time
+- `deadEnd` – a dropped approach and why – check these before a new attempt
 
 Set the dedicated `project` parameter (not a tag) to the project's canonical
 name – it is required on `remember`, `supersede`, and `fact_set`; the server
@@ -173,11 +187,53 @@ for splitting a catch-all project by topic. It carries each moved entry's
 full supersede chain along by default, so a history never straddles two
 projects, and it never touches facts. Same rule: `dryRun: true` first.
 
+## Threads
+
+A thread is a concrete matter with a state that will be done one day – a
+website relaunch, an offer to a client, a contract renewal. Entries belong
+to it. The state is one of `backlog`, `planned`, `inProgress`, `waiting`,
+`paused`, `done`, `dropped` (`done` and `dropped` end a thread).
+
+- **Find it first:** `thread_list` (filters `project`, `area`, `states`,
+  `includeClosed`) shows each thread's id, state, since when, `version` and
+  `entryCount`; `thread_get` (by `threadId`, or `title` + `project`) shows
+  the full state history and the attached entries.
+- **`thread_update` is the only state write.** Pass `threadId` to update,
+  or `title` + `project` + `state` to create (an existing live thread with
+  that title in that project is updated instead). Pass `eventAt` when you
+  know when the state became true (a plain date is fine) – never guess it;
+  without it the date is stored as unknown. A state dated before the
+  thread's latest known state date is stored as history only
+  (`action: historyAdded`). `note`
+  stores a status report as kind `snapshot` and attaches it;
+  `attachEntryIds` attaches existing entries; `pausedUntil` goes with
+  `paused`. With `threadId`, `title` renames and `project` moves the
+  thread.
+- **Read the result:** `action` (`created`, `updated`, `dated`,
+  `historyAdded`, `unchanged`) and `warning` say what happened. Pass the
+  `version` you read as `expectedVersion` when someone else may have
+  changed the thread: a `version_conflict` error means re-read with
+  `thread_get` and decide again – nothing was written. An
+  `idempotencyKey` makes a retry safe (`replayed: true`).
+- `remember` and `supersede` take `threadId` to attach the entry; a
+  `supersede` carries the old entry's threads to the new one by itself.
+- **The cockpit file:** if the user keeps a cockpit with a generated
+  thread section (between `<!-- remembox:threads:start -->` and
+  `<!-- remembox:threads:end -->`), never edit that section by hand – call
+  `thread_update`; `remembox cockpit-sync` (a CLI command, run in Claude
+  Code; it needs `OBX_MEMORY_COCKPIT_FILE` or `--cockpit <path>`)
+  rewrites it. Its lines show the thread id as `thread 12`; a `#123` in a
+  cockpit is always a memory entry, so use `thread_get` for threads and
+  `get` for entries. To have it run automatically, the release ZIP ships
+  `hooks/cockpit-sync-hook.sh` (`<unzip dir>/remembox/hooks/`), a quiet,
+  fail-open script for Claude Code's `SessionStart` and `Stop` hooks; the
+  README shows the `settings.json` entry.
+
 ## Structured facts
 
 Use `fact_set` instead of `remember` for a single exact value that can
 change over time and must be looked up exactly – an amount, an address, a
-status or stage, an identifier, a measurement. `remember` stays for prose:
+stage, an identifier, a measurement. `remember` stays for prose:
 reasons, decisions, experiences, and anything that reads as a sentence
 rather than a value.
 
@@ -200,6 +256,15 @@ of just the current row. `fact_forget` retracts a fact ("this was never
 true", no data loss), ends it as of a date with `validUntil` ("was true
 until then"), or deletes it permanently with `hard: true`.
 
+**Registered attributes.** `attributes_list` shows the attributes that
+are registered with `attribute_define` – each with a description and,
+often, its allowed values (e.g. `state`: `backlog`, `planned`,
+`inProgress`, `waiting`, `paused`, `done`, `dropped`). For such an
+attribute `fact_set` takes exactly one of those values (text, exact
+spelling); strict mode rejects anything else, open mode warns. Use the
+listed value instead of a paraphrase. Change the allowed values with
+`attribute_define` only when the user asks.
+
 **Reuse vocabulary, don't reinvent it.** Before inventing a new `attribute`
 name, run `fact_query` with that attribute and see what already exists –
 `rent` vs `monthlyRent` vs `baseRent` fragments lookups exactly the way an
@@ -213,11 +278,13 @@ that carries the explanation.
 Tags are cross-cutting labels, **not** a `recall` filter. Each tool that
 filters does so on its own set of fields, never on tags: `recall` filters by
 `kind`, `project`, `sourceType`, and `area`; `list_recent` filters by
-`project` and `area` only; `fact_query` filters by `attribute`,
+`project`, `area` and `kind`; `fact_query` filters by `attribute`,
 `subjectPrefix`, `project`, `area`, and `numberMin`/`numberMax` (plus
 `includeHistory`). Tags are never a filter on any of them. Use tags for
 things that group *across* projects instead: recurring people (`alice`),
-recurring themes, and workflow markers like `status`, `lesson`, or `todo`.
+recurring themes, and the workflow marker `todo`. Status reports, lessons
+and dead ends are kinds, not tags. Ask the user before registering a new
+curated tag.
 
 Rules the server actually enforces: tags are normalized to camelCase
 (`apps-script` becomes `appsScript`); more than 5 tags on one entry draws a
@@ -225,7 +292,7 @@ warning (all are still stored) and more than 64 is rejected outright. Keep
 it to 3-5 – fewer, sharper labels retrieve better.
 
 A tag is **dropped** only when it exactly matches the entry's project name,
-one of the five memory kinds, or an area the entry's project belongs to –
+one of the eight memory kinds, or an area the entry's project belongs to –
 those are already filterable, so the duplicate is pure noise. A tag that
 merely *looks like* one of those (a near-duplicate, not an exact match), or
 that looks like an identifier or version number, is **kept** (in strict
@@ -250,6 +317,41 @@ registered spelling's description over to the target, and `tag_remove`
 also removes the registration. `tags_normalize` is a one-shot upgrade helper: run it
 once after moving a store from a version older than 0.3.0 to fold every
 pre-existing tag spelling into today's camelCase form.
+
+`entries_update` changes the `kind` and/or the tags (`addTags`,
+`removeTags`) of selected entries in place – no new entry, history and
+links stay, nothing needs re-indexing. Use it to fix a wrong kind or a
+missing/stray tag, only when the user asks, with `dryRun: true` first.
+
+`kind_migrate` moves old marker tags to kinds in one pass (e.g. tag
+`deadEnd` → kind `deadEnd`, `learning` → `lesson`, `status` → `snapshot`):
+rules in precedence order, entries whose kind does not fit land in
+`review` unchanged, `legacyLinks` lists every `parent`/`child` link to
+re-create as `partOf`. A rule without `kind` removes its marker;
+with `list: true` and `keep: true` it only lists the entries. `byRule`
+counts per rule what was applied (`converted`, `markerRemoved`,
+`overridden`, `kept`) and, separately, `review`. Only when the user asks; `dryRun: true` first,
+then read `review` and `notFound` before the real run.
+
+`tag_retire` stops a tag from being written at all, with a one-sentence
+`hint` saying what to do instead (e.g. `status` – "use thread_update for
+the state and kind snapshot for the report"); its aliases are retired with
+it. In strict mode a write naming a retired
+tag is rejected with that hint; in open mode it is stored with a warning.
+Entries already carrying it keep it until they are migrated. `tags_list`
+lists retired tags as `retiredTags`; `remove: true` lifts a retirement.
+Retire only when the user asks.
+
+When the user asks to move old marker tags to kinds, keep this order:
+`tags_list` (note `kindCollisions`); remove kind-named aliases with
+`tag_define` `removeAliases` (never retire a kind name – it is dropped
+anyway); `tag_retire` the markers BEFORE any `tag_remove`;
+`attribute_define` if wanted; `kind_migrate` dry run (keep `review`,
+`listed`, `legacyLinks`), then the real run; fix each `review` entry with
+`entries_update` (remove all its markers); a second dry run without
+the `keep: true` rules must show `examined: 0`; only then `tag_remove` names from `tagsNowUnused`
+(`dryRun: true` first, `entriesChanged` must be 0); re-create
+`legacyLinks` as `partOf` (`unlink` + `link`).
 
 When the user asks to clean up tags into a register, keep this order:
 `tag_define` every kept tag and every merge target first (synonyms stay

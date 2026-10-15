@@ -53,13 +53,15 @@ import '../objectbox.g.dart';
 import 'model.dart';
 import 'store.dart';
 
-/// One open [Store] plus its nine boxes, bundled together so
+/// One open [Store] plus one box per entity, bundled together so
 /// [MemoryService] never has to call `store.box<T>()` itself. Built fresh on
 /// every [StoreGate] lending in gated mode; built exactly once (at
 /// [StoreGate.persistent] construction) in persistent mode.
 ///
 /// 2026-09-21, areas and facts (0.3.0): added [projects]/[areas]/
-/// [memberships]/[facts] alongside the original five boxes.
+/// [memberships]/[facts] alongside the original five boxes; later the tag
+/// registry boxes and (0.5.0) [tagRetirements]/[attributeDefinitions]/
+/// [attributeValues].
 class StoreSession {
   final Store store;
   final Box<MemoryEntry> entries;
@@ -73,6 +75,15 @@ class StoreSession {
   final Box<Fact> facts;
   final Box<TagDefinition> tagDefinitions;
   final Box<TagAlias> tagAliases;
+  // 0.5.0: retired tags and the attribute value register.
+  final Box<TagRetirement> tagRetirements;
+  final Box<AttributeDefinition> attributeDefinitions;
+  final Box<AttributeValue> attributeValues;
+  // 0.5.0: threads.
+  final Box<Thread> threads;
+  final Box<ThreadState> threadStates;
+  final Box<ThreadEntry> threadEntries;
+  final Box<ThreadOp> threadOps;
 
   StoreSession(this.store)
     : entries = store.box<MemoryEntry>(),
@@ -85,7 +96,14 @@ class StoreSession {
       memberships = store.box<AreaMembership>(),
       facts = store.box<Fact>(),
       tagDefinitions = store.box<TagDefinition>(),
-      tagAliases = store.box<TagAlias>();
+      tagAliases = store.box<TagAlias>(),
+      tagRetirements = store.box<TagRetirement>(),
+      attributeDefinitions = store.box<AttributeDefinition>(),
+      attributeValues = store.box<AttributeValue>(),
+      threads = store.box<Thread>(),
+      threadStates = store.box<ThreadState>(),
+      threadEntries = store.box<ThreadEntry>(),
+      threadOps = store.box<ThreadOp>();
 }
 
 /// Zone key marking "we are inside an executing [StoreGate.withStore]

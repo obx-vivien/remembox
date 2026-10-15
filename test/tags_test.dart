@@ -6,7 +6,7 @@
 /// Dart privacy is per-library and this test file is a separate library) and
 /// `tagsList`/`tagMerge`/`tagRemove` directly, since those three are public.
 ///
-/// Synthetic data only: tags `alice`, `bob`, `tax`, `status`, `lesson`,
+/// Synthetic data only: tags `alice`, `bob`, `tax`, `status`, `insight`,
 /// `AppsScript`, `contact`/`contacts`; projects `home`, `acme-app`; areas
 /// `work`.
 library;
@@ -431,21 +431,21 @@ void main() {
       'identical for more than one new tag at a time)',
       () async {
         await service.remember(text: 'contact seed', project: 'home', tags: ['contact']);
-        await service.remember(text: 'lesson seed', project: 'home', tags: ['lesson']);
+        await service.remember(text: 'insight seed', project: 'home', tags: ['insight']);
 
         final r = await service.remember(
           text: 'two near-dups in one call',
           project: 'home',
-          tags: ['contacts', 'lessons'],
+          tags: ['contacts', 'insights'],
         );
-        expect(tagNamesOf(r), ['contacts', 'lessons']);
+        expect(tagNamesOf(r), ['contacts', 'insights']);
         expect(
           warningOf(r),
           contains('did you mean the existing "contact"?'),
         );
         expect(
           warningOf(r),
-          contains('did you mean the existing "lesson"?'),
+          contains('did you mean the existing "insight"?'),
         );
       },
     );

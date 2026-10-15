@@ -1,7 +1,7 @@
 /// Tag discipline – 2026-09-21, tag discipline (0.3.0).
 ///
-/// Tags are cross-project labels (people, recurring topics, markers like
-/// `status`/`lesson`/`todo`) – NOT a second copy of `project`, `kind` or an
+/// Tags are cross-project labels (people, recurring topics, a marker like
+/// `todo`) – NOT a second copy of `project`, `kind` or an
 /// area name (those are already filterable on `recall`/`list_recent`/
 /// `fact_query`), and not an identifier/version (those belong in the text).
 /// [_prepareTags] is the SINGLE enforcement point for this rule, called by
@@ -151,6 +151,15 @@ final RegExp _tagKeyPluralSuffix = RegExp(r'(es|en|e|s)$');
 Map<String, String> _kindByNormalizedLower() => {
   for (final k in MemoryKind.all) _normalizeTag(k).toLowerCase(): k,
 };
+
+/// True if [normalized] (a [_normalizeTag] result) names a memory kind
+/// exactly, case-insensitively – the same exact match [_prepareTags] Step 2
+/// drops. 0.5.0: a [TagAlias] with such a name is inert – neither
+/// [_prepareTags] Step 1b nor [MemoryServiceTags._resolveAliasTarget]
+/// resolves it (a 0.4.0 store may hold an alias `lesson` -> `insight` from
+/// before `lesson` became a kind; the kind wins).
+bool _isKindName(String normalized) =>
+    _kindByNormalizedLower().containsKey(normalized.toLowerCase());
 
 /// Loose-key kind lookup – the [_tagKey] counterpart of
 /// [_kindByNormalizedLower], shared the same way (2026-09-21 review4 m8
@@ -409,6 +418,12 @@ String _tagKey(String tag) {
 /// `es`/`en`/`e`/`s` – 2026-09-21 review4 N3 fix, see [_tagKey]'s own doc.
 const int _tagKeyMinStemLen = 3;
 
+/// `tags_list`'s warning next to a non-empty `kindCollisions` (0.5.0).
+const String kindCollisionWarning =
+    'Tag names equal to a memory kind are dropped on write since 0.5.0 – '
+    'migrate entries with kind_migrate/entries_update, then tag_remove the '
+    'tag or removeAliases the alias.';
+
 /// Default `tagsList` page size when the caller passes no `limit` –
 /// 2026-09-21 review3 m10 fix: previously unbounded by default (500+ rows
 /// in the live store). `totalMatching`/`truncated` already tell the
@@ -456,6 +471,11 @@ extension MemoryServiceTags on MemoryService {
     required String project,
     required String kind,
     String tool = 'remember',
+    // 0.5.0 (entries_update): the tags that stay attached to the entry –
+    // used only for the "more than 5 tags" warning (Step 4), counted
+    // together with the prepared tags without counting a name twice. Empty
+    // keeps every existing caller identical.
+    Set<String> alreadyAttached = const {},
   }) {
     final warnings = <String>[];
     if (raw.isEmpty) return (tags: const [], warnings: warnings);
@@ -521,6 +541,70 @@ extension MemoryServiceTags on MemoryService {
       // collapsed, nothing "differed" to warn about (spec).
     }
 
+    // Areas this project belongs to – exact-match query + distinct
+    // property projection, the same pattern `projectSet`'s `currentAreas`
+    // already uses (memory_service_registry.dart) – reused, not duplicated.
+    // Built here, before Step 1a, because a tag that repeats the entry's
+    // own project, an area of it or a kind is dropped in Step 2 whether
+    // or not its name is retired (0.5.0).
+    final areaNames = _useQuery(
+      _memberships.query(
+        AreaMembership_.project.equals(project, caseSensitive: true),
+      ),
+      (q) {
+        final prop = q.property(AreaMembership_.area)
+          ..distinct = true
+          ..caseSensitive = true;
+        try {
+          return prop.find();
+        } finally {
+          prop.close();
+        }
+      },
+    );
+    final redundancy = _TagRedundancyContext(
+      projects: [project],
+      areas: areaNames,
+    );
+
+    // Step 1a (0.5.0, retired tags): a tag that is retired (`tag_retire`)
+    // – by its own name or as an alias of a retired tag – is collected for
+    // the strict rejection in Step 2c (and leaves the pipeline), or, in
+    // open mode, warned about and kept on the normal path. Only runs when
+    // any retirement exists, so a store without retirements takes exactly
+    // the path it took before.
+    final retiredDescribed = <String>[];
+    var notRetired = survivingNormalized;
+    if (survivingNormalized.isNotEmpty && _tagRetirements.count() > 0) {
+      notRetired = <String>[];
+      for (final normalized in survivingNormalized) {
+        // Redundant with the entry's own project/area/kind: always the
+        // Step 2 drop (its warning), never a retirement rejection or a
+        // "stored anyway" warning.
+        final redundantHere = switch (redundancy.classify(normalized).kind) {
+          _TagRedundancy.exactProject ||
+          _TagRedundancy.exactKind ||
+          _TagRedundancy.exactArea => true,
+          _ => false,
+        };
+        if (redundantHere) {
+          notRetired.add(normalized);
+          continue;
+        }
+        final info = _retirementOf(normalized);
+        if (info == null) {
+          notRetired.add(normalized);
+          continue;
+        }
+        if (registryMode == RegistryMode.strict) {
+          retiredDescribed.add(_describeRetired(normalized, info));
+          continue;
+        }
+        warnings.add(_openRetiredWarning(normalized, info));
+        notRetired.add(normalized);
+      }
+    }
+
     // Step 1b (2026-10-06, tag aliases): a tag that is not a registered
     // tag itself but exactly matches a TagAlias is replaced by the
     // canonical tag – in both registry modes, with a warning and a log
@@ -529,12 +613,25 @@ extension MemoryServiceTags on MemoryService {
     // that the substitution creates collapse to the first occurrence.
     // Before the redundancy and strict steps, so those judge the tag
     // that will actually be stored.
-    var resolvedNormalized = survivingNormalized;
-    if (survivingNormalized.isNotEmpty && _tagAliases.count() > 0) {
+    //
+    // 0.5.0: an alias named like a memory kind is inert ([_isKindName]) –
+    // the name is left for Step 2, which drops it as a kind (with its
+    // warning); only the skipped resolution is logged here.
+    var resolvedNormalized = notRetired;
+    if (notRetired.isNotEmpty && _tagAliases.count() > 0) {
       resolvedNormalized = <String>[];
-      for (final normalized in survivingNormalized) {
+      for (final normalized in notRetired) {
         var resolved = normalized;
-        if (!_isRegisteredTag(normalized)) {
+        if (_isKindName(normalized)) {
+          final alias = _tagAliasFor(normalized);
+          if (alias != null) {
+            log(
+              '[memory] tag alias not resolved: '
+              '"${MemoryService.sanitizeForLog(normalized)}" is a memory '
+              'kind (aliases named like a kind are inert since 0.5.0)',
+            );
+          }
+        } else if (!_isRegisteredTag(normalized)) {
           final alias = _tagAliasFor(normalized);
           if (alias != null) {
             final a = MemoryService.sanitizeForLog(normalized);
@@ -588,28 +685,7 @@ extension MemoryServiceTags on MemoryService {
     // `kind` argument – tag "reference" on a kind="fact" entry names
     // "reference").
     //
-    // Areas this project belongs to – exact-match query + distinct
-    // property projection, the same pattern `projectSet`'s `currentAreas`
-    // already uses (memory_service_registry.dart) – reused, not duplicated.
-    final areaNames = _useQuery(
-      _memberships.query(
-        AreaMembership_.project.equals(project, caseSensitive: true),
-      ),
-      (q) {
-        final prop = q.property(AreaMembership_.area)
-          ..distinct = true
-          ..caseSensitive = true;
-        try {
-          return prop.find();
-        } finally {
-          prop.close();
-        }
-      },
-    );
-    final redundancy = _TagRedundancyContext(
-      projects: [project],
-      areas: areaNames,
-    );
+    // The redundancy context itself is built before Step 1a (see there).
 
     final afterRedundancy = <String>[];
     for (final normalized in resolvedNormalized) {
@@ -674,14 +750,33 @@ extension MemoryServiceTags on MemoryService {
     // registered. One exact count() per tag (at most _tagMaxCount); the
     // definitions are paged only when something is missing, to build the
     // suggestions.
-    if (registryMode == RegistryMode.strict && afterRedundancy.isNotEmpty) {
+    //
+    // 0.5.0: retired tags collected in Step 1a are rejected here too, in
+    // ONE message – the retired sentence first, then the unregistered text
+    // (if any); "Nothing was written." once. Without retired tags the
+    // message is unchanged.
+    if (registryMode == RegistryMode.strict &&
+        (afterRedundancy.isNotEmpty || retiredDescribed.isNotEmpty)) {
       final unregistered = [
         for (final t in afterRedundancy)
           if (!_isRegisteredTag(t)) t,
       ];
+      final retiredText = retiredDescribed.isEmpty
+          ? ''
+          : 'tag(s) retired (strict registry mode): '
+                '${retiredDescribed.join('; ')}. Remove these tags and follow '
+                'the hint.';
+      if (unregistered.isEmpty && retiredDescribed.isNotEmpty) {
+        _rejectStrict(tool, '$retiredText Nothing was written.');
+      }
       if (unregistered.isNotEmpty) {
         final registered = _registeredTagNames();
-        final allAliases = _allTagAliases();
+        // Kind-named aliases are inert (never resolved), so they are never
+        // offered as a suggestion either.
+        final allAliases = {
+          for (final e in _allTagAliases().entries)
+            if (!_isKindName(e.key)) e.key: e.value,
+        };
         final defContext = _tagDefinitionContext();
         final described = <String>[];
         var registrable = 0;
@@ -740,6 +835,7 @@ extension MemoryServiceTags on MemoryService {
                   'marks>"), then retry. ';
         _rejectStrict(
           tool,
+          '${retiredText.isEmpty ? '' : '$retiredText '}'
           'tag(s) not registered (strict registry mode): '
           '${described.join(', ')}. Use a registered tag or drop it. '
           '${registerAdvice}tags_list shows every registered tag. Nothing '
@@ -783,10 +879,12 @@ extension MemoryServiceTags on MemoryService {
     // ([MemoryService._tagMaxCount]) already ran against the RAW list in
     // `_requireArgLengths`; this is a softer, lower threshold that still
     // stores everything, just warns.
-    if (afterRedundancy.length > 5) {
+    final tagsOnEntry = alreadyAttached.isEmpty
+        ? afterRedundancy.length
+        : {...alreadyAttached, ...afterRedundancy}.length;
+    if (tagsOnEntry > 5) {
       warnings.add(
-        '${afterRedundancy.length} tags on one entry – more than 5 rarely '
-        'help grouping.',
+        '$tagsOnEntry tags on one entry – more than 5 rarely help grouping.',
       );
     }
 
@@ -818,6 +916,132 @@ extension MemoryServiceTags on MemoryService {
         (q) => q.count(),
       ) >
       0;
+
+  // ---------------------------------------------------------------------
+  // Retired tags (TagRetirement) – 0.5.0
+  // ---------------------------------------------------------------------
+
+  /// Read. The retirement row named exactly (case-sensitive) [name], or
+  /// null.
+  TagRetirement? _tagRetirementFor(String name) => _useQuery(
+    _tagRetirements.query(
+      TagRetirement_.name.equals(name, caseSensitive: true),
+    ),
+    (q) => q.findFirst(),
+  );
+
+  /// Read. Every row retired WITH the tag [name] (its alternative names,
+  /// `aliasOf == name`), sorted by name.
+  List<TagRetirement> _retiredAliasesOf(String name) =>
+      _useQuery(
+        _tagRetirements.query(
+          TagRetirement_.aliasOf.equals(name, caseSensitive: true),
+        ),
+        (q) => q.find(),
+      )..sort((a, b) => a.name.compareTo(b.name));
+
+  /// Read. Whether the normalized tag [name] is retired: by its own row,
+  /// or as a [TagAlias] of a retired tag ([aliasOf] then names that tag).
+  /// Null when not retired – and always for a name equal to a memory kind
+  /// ([_isKindName]): such a tag is dropped as a kind in Step 2 (with the
+  /// kind warning), whether or not the name was retired, so a retirement
+  /// never adds a contradicting "stored anyway" warning or a strict
+  /// rejection to it. Callers check `_tagRetirements.count() > 0` first.
+  ({String hint, String? aliasOf})? _retirementOf(String name) {
+    if (_isKindName(name)) return null;
+    final own = _tagRetirementFor(name);
+    if (own != null) {
+      return (hint: own.hint, aliasOf: own.aliasOf.isEmpty ? null : own.aliasOf);
+    }
+    final alias = _tagAliasFor(name);
+    if (alias == null) return null;
+    final target = _tagRetirementFor(alias.tag);
+    if (target == null) return null;
+    return (hint: target.hint, aliasOf: alias.tag);
+  }
+
+  /// A hint as shown inside a sentence: trimmed, without a final full stop.
+  static String _hintText(String hint) => MemoryService.sanitizeForLog(
+    hint.trim().replaceFirst(RegExp(r'[.\s]+$'), ''),
+  );
+
+  /// One item of the strict rejection message: the name and the hint
+  /// (`"status" – HINT`), with `(alias of the retired tag "learning")`
+  /// after the name when it is retired as an alias.
+  static String _describeRetired(
+    String name,
+    ({String hint, String? aliasOf}) info,
+  ) {
+    final n = MemoryService.sanitizeForLog(name);
+    final via = info.aliasOf == null
+        ? ''
+        : ' (alias of the retired tag '
+              '"${MemoryService.sanitizeForLog(info.aliasOf!)}")';
+    return '"$n"$via – ${_hintText(info.hint)}';
+  }
+
+  /// The open-mode warning for a retired tag that is stored anyway.
+  static String _openRetiredWarning(
+    String name,
+    ({String hint, String? aliasOf}) info,
+  ) {
+    final n = MemoryService.sanitizeForLog(name);
+    final via = info.aliasOf == null
+        ? ''
+        : ' (alias of the retired tag '
+              '"${MemoryService.sanitizeForLog(info.aliasOf!)}")';
+    return 'Tag "$n"$via is retired – ${_hintText(info.hint)}. Stored anyway '
+        '(open registry mode).';
+  }
+
+  /// Read. `"x" is retired (HINT)`, or `"x" is retired with "y" (HINT)`
+  /// for a name retired as an alternative name of "y", plus the root name
+  /// whose retirement would have to be lifted – null when [name] has no
+  /// retirement row of its own. Shared by the tag_define/tag_merge guards.
+  ({String text, String root})? _retiredClause(String name) {
+    if (_tagRetirements.count() == 0) return null;
+    final row = _tagRetirementFor(name);
+    if (row == null) return null;
+    final n = MemoryService.sanitizeForLog(name);
+    if (row.aliasOf.isEmpty) {
+      return (text: '"$n" is retired (${_hintText(row.hint)})', root: name);
+    }
+    return (
+      text:
+          '"$n" is retired with "${MemoryService.sanitizeForLog(row.aliasOf)}" '
+          '(${_hintText(row.hint)})',
+      root: row.aliasOf,
+    );
+  }
+
+  /// `tag_retire(name: "x", remove: true)` for an error message.
+  static String _liftHint(String root) =>
+      'tag_retire(name: "${MemoryService.sanitizeForLog(root)}", remove: '
+      'true)';
+
+  /// Logs one `[memory] <tool>: rejected – …` line and throws – the exit
+  /// for the retired-tag guards (tag_define, tag_merge), which apply in
+  /// both registry modes.
+  Never _rejectRetired(String tool, String message) {
+    log('[memory] $tool: rejected – ${MemoryService.sanitizeForLog(message)}');
+    throw ValidationException(message);
+  }
+
+  /// Read. How many LIVE entries (not superseded, not expired at [now])
+  /// carry the tag named exactly [name] – one counting query through the
+  /// tags relation, no entry hydration.
+  int _liveTagUseCount(String name, DateTime now) {
+    final builder = _entries.query(
+      MemoryEntry_.supersededBy.equals(0) &
+          (MemoryEntry_.expiresAt.isNull() |
+              MemoryEntry_.expiresAt.greaterThanDate(now)),
+    );
+    builder.linkMany(
+      MemoryEntry_.tags,
+      Tag_.name.equals(name, caseSensitive: true),
+    );
+    return _useQuery(builder, (q) => q.count());
+  }
 
   /// Read. The [TagDefinition] row for exactly this name, or null.
   TagDefinition? _tagDefinitionFor(String name) => _useQuery(
@@ -1019,6 +1243,8 @@ extension MemoryServiceTags on MemoryService {
         if (e.key == normalized || ignoreRegistered.contains(e.value)) {
           continue;
         }
+        // An alias named like a kind is inert (0.5.0) – not a variant.
+        if (_isKindName(e.key)) continue;
         if (_tagKey(e.key) != key) continue;
         aliasVariants.add(
           '"${MemoryService.sanitizeForLog(e.key)}" (alias of '
@@ -1247,6 +1473,7 @@ extension MemoryServiceTags on MemoryService {
           if (e.value != tag &&
               e.key != alias &&
               !ignoreRegistered.contains(e.value) &&
+              !_isKindName(e.key) &&
               _tagKey(e.key) == key)
             '"${MemoryService.sanitizeForLog(e.key)}" (alias of '
                 '"${MemoryService.sanitizeForLog(e.value)}")',
@@ -1285,7 +1512,8 @@ extension MemoryServiceTags on MemoryService {
   /// would write the alias name as a tag of its own and bypass the
   /// resolution `_prepareTags` does on every write. Logged, and the
   /// returned [warning] uses the `_prepareTags` wording. An alias whose
-  /// tag is not registered (dangling) is left alone.
+  /// tag is not registered (dangling) is left alone, and so (0.5.0) is an
+  /// alias named like a memory kind ([_isKindName]).
   ({String target, String? warning}) _resolveAliasTarget(
     String normalized, {
     required String logPrefix,
@@ -1295,6 +1523,16 @@ extension MemoryServiceTags on MemoryService {
     }
     final alias = _tagAliasFor(normalized);
     if (alias == null || !_isRegisteredTag(alias.tag)) {
+      return (target: normalized, warning: null);
+    }
+    // 0.5.0: an alias named like a memory kind is inert ([_isKindName]).
+    if (_isKindName(normalized)) {
+      log(
+        '[memory] $logPrefix: target '
+        '"${MemoryService.sanitizeForLog(normalized)}" is a memory kind – '
+        'its alias of "${MemoryService.sanitizeForLog(alias.tag)}" is inert '
+        'since 0.5.0, not resolved',
+      );
       return (target: normalized, warning: null);
     }
     final a = MemoryService.sanitizeForLog(normalized);
@@ -1425,6 +1663,29 @@ extension MemoryServiceTags on MemoryService {
     return _withSession('tag_define', () {
       return store.runInTransaction(TxMode.write, () {
         final warnings = <String>[...aliasArgWarnings];
+        // 0.5.0: a retired name can be neither defined nor changed until
+        // its retirement is lifted (both registry modes) – except removing
+        // aliases from its definition (removeAliases alone), the cleanup
+        // the kindCollisions and tag_remove hints point at.
+        final retired = _retiredClause(normalized);
+        final removalOnly =
+            removeArg != null &&
+            replaceArg == null &&
+            addArg == null &&
+            description == null;
+        if (retired != null && removalOnly) {
+          log(
+            '[memory] tag_define: "$shown" is retired – removing aliases '
+            'only, as allowed',
+          );
+        }
+        if (retired != null && !removalOnly) {
+          _rejectRetired(
+            'tag_define',
+            'tag_define: ${retired.text}. Lift the retirement first with '
+            '${_liftHint(retired.root)}.',
+          );
+        }
         // Aliases are validated first, so any conflict rejects the whole
         // call before anything is written.
         if (toAdd.isNotEmpty) {
@@ -1432,7 +1693,18 @@ extension MemoryServiceTags on MemoryService {
           final registeredNames = _registeredTagNames();
           final allAliases = _allTagAliases();
           final conflicts = <String>[];
+          var retiredConflict = false;
           for (final alias in toAdd) {
+            // 0.5.0: a retired name cannot become an alias either.
+            final retiredAlias = _retiredClause(alias);
+            if (retiredAlias != null) {
+              retiredConflict = true;
+              conflicts.add(
+                '${retiredAlias.text} – lift the retirement first with '
+                '${_liftHint(retiredAlias.root)}',
+              );
+              continue;
+            }
             final c = _aliasConflict(
               alias,
               normalized,
@@ -1449,10 +1721,11 @@ extension MemoryServiceTags on MemoryService {
             conflicts.add('${c.reason}$hint');
           }
           if (conflicts.isNotEmpty) {
-            throw ValidationException(
-              'tag_define: alias(es) rejected for "$shown": '
-              '${conflicts.join('; ')}. Nothing was written.',
-            );
+            final message =
+                'tag_define: alias(es) rejected for "$shown": '
+                '${conflicts.join('; ')}. Nothing was written.';
+            if (retiredConflict) _rejectRetired('tag_define', message);
+            throw ValidationException(message);
           }
         }
         final existing = _tagDefinitionFor(normalized);
@@ -1653,6 +1926,303 @@ extension MemoryServiceTags on MemoryService {
           if (warnings.isNotEmpty) 'warning': warnings.join(' '),
         };
         return _applyGuardPeerWarning(result);
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // tagRetire – 0.5.0
+  // ---------------------------------------------------------------------
+
+  /// Retires the tag [name] (a [TagRetirement] row) with a [hint] saying
+  /// what to do instead, or – with [remove] – lifts its retirement.
+  ///
+  /// [name] is normalized like a tag ([_normalizeTag]); any name may be
+  /// retired, whether or not it is registered or in use – a project or
+  /// area name with a warning, a kind name with a warning that it changes
+  /// no write (a tag equal to a kind is always dropped as a kind, see
+  /// [_retirementOf]). Every alternative name is retired with it: the
+  /// tag's [TagAlias] rows always, plus the extra [aliases] given here
+  /// (normalized like aliases) – one row each, `aliasOf` = [name], so a
+  /// write using an old alias is caught even after its TagAlias row is
+  /// gone; kind names are skipped (`aliasesSkippedAsKind`, logged). A name
+  /// already retired with ANOTHER tag (or on its own) rejects the call,
+  /// nothing written.
+  ///
+  /// Creating needs a non-blank [hint]; an existing retirement gets a new
+  /// hint (on every one of its rows) when a different one is given, and
+  /// new alternative names added (`updated`), otherwise `unchanged`.
+  /// [remove] deletes the tag's row and every row retired with it
+  /// (`removed`); a name that is not retired is `unchanged` with a
+  /// warning. A name retired as an alternative name of another tag is
+  /// managed through that tag.
+  ///
+  /// Never touches [TagDefinition], [TagAlias], [Tag] or any entry:
+  /// entries keep a retired tag until `kind_migrate`/`entries_update`
+  /// remove it – `inUse` (live entries per retired name) and the warning
+  /// say how many still carry one.
+  ///
+  /// One lending, one write transaction. Result: `{name, action, hint,
+  /// aliasesRetired, inUse, normalizedFrom?, warning?}`.
+  Future<Map<String, Object?>> tagRetire({
+    required String name,
+    String? hint,
+    List<String>? aliases,
+    bool remove = false,
+  }) async {
+    MemoryService._requireLen('name', name, MemoryService._tagMaxLen);
+    if (_controlCharPattern.hasMatch(name)) {
+      throw ValidationException(
+        'tag_retire: "${MemoryService.sanitizeForLog(name)}" contains '
+        'control characters.',
+      );
+    }
+    final normalized = _normalizeTag(name);
+    if (normalized.isEmpty) {
+      throw ValidationException(
+        'tag_retire: "${MemoryService.sanitizeForLog(name)}" is empty after '
+        'normalization.',
+      );
+    }
+    if (remove && (hint != null || aliases != null)) {
+      throw ValidationException(
+        'tag_retire: "remove" lifts the whole retirement – pass it without '
+        '"hint" and "aliases".',
+      );
+    }
+    if (hint != null) {
+      MemoryService._requireLen('hint', hint, _registryDescriptionMaxLen);
+      if (hint.trim().isEmpty) {
+        throw ValidationException(
+          'tag_retire: hint must not be blank (one sentence: what to do '
+          'instead).',
+        );
+      }
+    }
+    final aliasArg = aliases == null
+        ? null
+        : _normalizeAliasArgs('tag_retire', 'aliases', aliases);
+    final shown = MemoryService.sanitizeForLog(normalized);
+
+    return _withSession('tag_retire', () {
+      return store.runInTransaction(TxMode.write, () {
+        final now = DateTime.now().toUtc();
+        final warnings = <String>[...?aliasArg?.warnings];
+        // Alternative names equal to a memory kind are never retired: a tag
+        // of that name is dropped as a kind on every write anyway.
+        final skippedAsKind = <String>[];
+        final existing = _tagRetirementFor(normalized);
+        if (existing != null && existing.aliasOf.isNotEmpty) {
+          final root = MemoryService.sanitizeForLog(existing.aliasOf);
+          throw ValidationException(
+            'tag_retire: "$shown" is retired as an alternative name of '
+            '"$root" – change it through tag_retire(name: "$root").',
+          );
+        }
+
+        Map<String, int> inUseOf(Iterable<String> names) => {
+          for (final n in names) n: _liveTagUseCount(n, now),
+        };
+
+        Map<String, Object?> finish(
+          String action,
+          String? currentHint,
+          List<String> aliasNames,
+        ) {
+          final inUse = inUseOf([normalized, ...aliasNames]);
+          final carrying = inUse.entries.where((e) => e.value > 0).toList();
+          // Only while the names are retired (not after a removal, and not
+          // for a name that was never retired).
+          if (currentHint != null &&
+              action != 'removed' &&
+              carrying.isNotEmpty) {
+            final listed = carrying
+                .map(
+                  (e) => '"${MemoryService.sanitizeForLog(e.key)}" '
+                      '(${e.value})',
+                )
+                .join(', ');
+            warnings.add(
+              'Live entries still carry the retired tag(s) $listed – '
+              'kind_migrate or entries_update (removeTags) moves them; until '
+              'then a write naming them is rejected in strict registry mode '
+              'and warned about in open mode.',
+            );
+          }
+          log(
+            '[memory] tag_retire "$shown": action=$action '
+            'aliases=${aliasNames.length} '
+            'inUse=${inUse.values.fold<int>(0, (a, b) => a + b)}',
+          );
+          final result = <String, Object?>{
+            'name': normalized,
+            'action': action,
+            'hint': currentHint,
+            if (normalized != name) 'normalizedFrom': name,
+            'aliasesRetired': aliasNames,
+            if (skippedAsKind.isNotEmpty) 'aliasesSkippedAsKind': skippedAsKind,
+            'inUse': inUse,
+            if (warnings.isNotEmpty) 'warning': warnings.join(' '),
+          };
+          return _applyGuardPeerWarning(result);
+        }
+
+        if (remove) {
+          if (existing == null) {
+            warnings.add('"$shown" is not retired – nothing removed.');
+            log('[memory] tag_retire: "$shown" is not retired – nothing '
+                'removed');
+            return finish('unchanged', null, const []);
+          }
+          final rows = [existing, ..._retiredAliasesOf(normalized)];
+          for (final row in rows) {
+            _tagRetirements.remove(row.id);
+            log(
+              '[memory] tag_retire: lifted the retirement of '
+              '"${MemoryService.sanitizeForLog(row.name)}" (id ${row.id})',
+            );
+          }
+          return finish('removed', existing.hint, [
+            for (final row in rows.skip(1)) row.name,
+          ]);
+        }
+
+        if (_isKindName(normalized)) {
+          warnings.add(
+            '"$shown" is a memory kind – a tag of that name is dropped as a '
+            'kind on every write anyway, so this retirement changes no '
+            'write.',
+          );
+          log('[memory] tag_retire: "$shown" is a memory kind – the '
+              'retirement changes no write');
+        }
+        // A root name that repeats a project or area: a tag equal to an
+        // entry's own project or area is dropped as redundant there anyway;
+        // the retirement only applies to entries elsewhere.
+        if (!_isKindName(normalized)) {
+          final repeats = _checkNewTagDefinition(
+            normalized,
+            _tagDefinitionContext(),
+            registered: const [],
+          ).redundantWith;
+          if (repeats != null) {
+            warnings.add(
+              '"$shown" repeats $repeats – on an entry of that project or '
+              'area the tag is dropped as redundant anyway; the retirement '
+              'applies to entries elsewhere.',
+            );
+            log('[memory] tag_retire: "$shown" repeats '
+                '${MemoryService.sanitizeForLog(repeats)}');
+          }
+        }
+        // Alternative names: the extra ones given, then the tag's
+        // TagAlias rows; never the tag itself, never a kind name.
+        final candidates = <String>[];
+        final extra = aliasArg?.names ?? const <String>[];
+        for (final a in [
+          ...extra,
+          for (final row in _aliasesOf(normalized)) row.name,
+        ]) {
+          if (a == normalized ||
+              candidates.contains(a) ||
+              skippedAsKind.contains(a)) {
+            continue;
+          }
+          if (_isKindName(a)) {
+            skippedAsKind.add(a);
+            final shownAlias = MemoryService.sanitizeForLog(a);
+            warnings.add(
+              '"$shownAlias" is a memory kind – not retired with "$shown" (a '
+              'tag of that name is dropped as a kind on every write anyway).'
+              '${_tagAliasFor(a)?.tag != normalized ? '' : ' To drop the alias: '
+                  'tag_define(name: "$shown", removeAliases: ["$shownAlias"]).'}',
+            );
+            log(
+              '[memory] tag_retire: skipped "$shownAlias" for "$shown" – it '
+              'is a memory kind',
+            );
+            continue;
+          }
+          candidates.add(a);
+        }
+        // An extra name that repeats a project or area: allowed (it is
+        // only a tag name being blocked), but said out loud.
+        if (extra.isNotEmpty) {
+          final defContext = _tagDefinitionContext();
+          for (final a in extra) {
+            if (!candidates.contains(a)) continue;
+            final repeats = _checkNewTagDefinition(
+              a,
+              defContext,
+              registered: const [],
+            ).redundantWith;
+            if (repeats == null) continue;
+            warnings.add(
+              '"${MemoryService.sanitizeForLog(a)}" repeats $repeats – '
+              'retired as a tag name anyway.',
+            );
+          }
+        }
+        final conflicts = <String>[];
+        for (final a in candidates) {
+          final other = _tagRetirementFor(a);
+          if (other == null || other.aliasOf == normalized) continue;
+          final shownAlias = MemoryService.sanitizeForLog(a);
+          conflicts.add(
+            other.aliasOf.isEmpty
+                ? '"$shownAlias" is retired on its own'
+                : '"$shownAlias" is already retired with '
+                      '"${MemoryService.sanitizeForLog(other.aliasOf)}"',
+          );
+        }
+        if (conflicts.isNotEmpty) {
+          throw ValidationException(
+            'tag_retire: alias(es) rejected for "$shown": '
+            '${conflicts.join('; ')}. Nothing was written.',
+          );
+        }
+
+        String action;
+        final TagRetirement root;
+        if (existing == null) {
+          if (hint == null) {
+            throw ValidationException(
+              'tag_retire: "$shown" is not retired yet – a hint is required '
+              '(one sentence: what to do instead).',
+            );
+          }
+          root = TagRetirement(name: normalized, hint: hint);
+          root.id = _tagRetirements.put(root);
+          action = 'created';
+          log('[memory] tag_retire: retired "$shown" (id ${root.id})');
+        } else {
+          root = existing;
+          action = 'unchanged';
+          if (hint != null && hint != existing.hint) {
+            for (final row in [existing, ..._retiredAliasesOf(normalized)]) {
+              row
+                ..hint = hint
+                ..updatedAt = now;
+              _tagRetirements.put(row);
+            }
+            action = 'updated';
+            log('[memory] tag_retire: updated the hint of "$shown"');
+          }
+        }
+        final have = {for (final r in _retiredAliasesOf(normalized)) r.name};
+        for (final a in candidates) {
+          if (have.contains(a)) continue;
+          final row = TagRetirement(name: a, hint: root.hint, aliasOf: normalized);
+          row.id = _tagRetirements.put(row);
+          if (action == 'unchanged') action = 'updated';
+          log(
+            '[memory] tag_retire: retired "${MemoryService.sanitizeForLog(a)}" '
+            'with "$shown" (id ${row.id})',
+          );
+        }
+        return finish(action, root.hint, [
+          for (final r in _retiredAliasesOf(normalized)) r.name,
+        ]);
       });
     });
   }
@@ -1929,6 +2499,54 @@ extension MemoryServiceTags on MemoryService {
             .where((e) => e.value > 0 && isUsableAlias(e.key))
             .length;
 
+        // 0.5.0: tag, registered-tag and alias names equal to a memory kind
+        // ([_isKindName]) – `_prepareTags` drops such a tag on every write
+        // and an alias of that name no longer resolves, so they are
+        // cleanup work. Reported only when there are any; `count` is the
+        // number of LIVE entries carrying the name (as for every row).
+        final kindByLower = _kindByNormalizedLower();
+        final kindCollisions = <Map<String, Object?>>[];
+        for (final name in {...countByName.keys, ...aliasOf.keys}.toList()
+          ..sort()) {
+          final kind = kindByLower[_normalizeTag(name).toLowerCase()];
+          if (kind == null) continue;
+          kindCollisions.add({
+            'name': name,
+            'as': descriptions.containsKey(name)
+                ? 'registeredTag'
+                : aliasOf.containsKey(name)
+                ? 'alias'
+                : 'tag',
+            'kind': kind,
+            'count': countByName[name] ?? 0,
+          });
+        }
+        // 0.5.0: retired names with their hint and live use – only when
+        // any exist (a store without retirements keeps its result shape).
+        final retiredTags = <Map<String, Object?>>[];
+        if (_tagRetirements.count() > 0) {
+          _pageThrough<TagRetirement>(_tagRetirements.query(), (page) {
+            for (final r in page) {
+              retiredTags.add({
+                'name': r.name,
+                'hint': r.hint,
+                if (r.aliasOf.isNotEmpty) 'aliasOf': r.aliasOf,
+                'inUse': countByName[r.name] ?? 0,
+              });
+            }
+          });
+          retiredTags.sort(
+            (a, b) => (a['name']! as String).compareTo(b['name']! as String),
+          );
+        }
+        if (kindCollisions.isNotEmpty) {
+          log(
+            '[memory] tags_list: ${kindCollisions.length} tag name(s) equal '
+            'a memory kind: '
+            '${kindCollisions.map((c) => '"${MemoryService.sanitizeForLog(c['name']! as String)}" (${c['as']})').join(', ')}',
+          );
+        }
+
         return {
           'tags': limited,
           // 2026-09-21 review4 fix: `total` alongside the pre-existing
@@ -1953,6 +2571,11 @@ extension MemoryServiceTags on MemoryService {
           // many alias names entries still carry.
           'aliases': aliasOf.length,
           'aliasesInUse': aliasesInUse,
+          if (retiredTags.isNotEmpty) 'retiredTags': retiredTags,
+          if (kindCollisions.isNotEmpty) ...{
+            'kindCollisions': kindCollisions,
+            'warning': kindCollisionWarning,
+          },
           '_provenance_note': MemoryService._provenanceNote,
         };
       });
@@ -2102,6 +2725,18 @@ extension MemoryServiceTags on MemoryService {
           logPrefix: 'tag_merge',
         );
         final target = resolvedInto.target;
+        // 0.5.0: never merge into a retired name (both registry modes, dry
+        // run too).
+        for (final candidate in {normalizedInto, target}) {
+          final retired = _retiredClause(candidate);
+          if (retired == null) continue;
+          _rejectRetired(
+            'tag_merge',
+            'tag_merge: "into" – ${retired.text}. Merge into another tag, or '
+            'lift the retirement first with ${_liftHint(retired.root)}. '
+            'Nothing was changed.',
+          );
+        }
         if (resolvedInto.warning != null) {
           intoWarnings.add(resolvedInto.warning!);
           if (dedupedFrom.contains(target)) {
@@ -2768,6 +3403,26 @@ extension MemoryServiceTags on MemoryService {
               '"$a" is an alias of "$t" and stays one – tag_define(name: '
               '"$t", removeAliases: ["$a"]) removes it.',
             );
+          }
+        }
+        // 0.5.0: a retirement outlives the tag – tag_remove never deletes
+        // TagRetirement rows (a later write of the name must still be
+        // caught); only tag_retire(remove: true) lifts one.
+        if (_tagRetirements.count() > 0) {
+          final kept = [
+            for (final name in dedupedTags)
+              if (_tagRetirementFor(name) != null) name,
+          ]..sort();
+          if (kept.isNotEmpty) {
+            result['retirementsKept'] = kept;
+            final listed = kept
+                .map((n) => '"${MemoryService.sanitizeForLog(n)}"')
+                .join(', ');
+            aliasHints.add(
+              'The retirement of $listed stays – tag_remove does not lift '
+              'it; tag_retire(name, remove: true) does.',
+            );
+            log('[memory] tag_remove: kept the retirement of $listed');
           }
         }
         if (aliasHints.isNotEmpty) result['warning'] = aliasHints.join(' ');

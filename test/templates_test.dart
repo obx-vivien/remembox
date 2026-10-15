@@ -9,13 +9,15 @@
 /// - Every tool name the global CLAUDE.md template mentions is a real,
 ///   registered tool (lib/src/server.dart), so the template never teaches
 ///   a call that does not exist.
-/// - The release ships templates/ and the acceptance test checks it.
+/// - The release ships templates/ and hooks/ and the acceptance test checks
+///   them.
 /// - Prose style: spaced en dashes, never an em dash.
 library;
 
 import 'dart:io';
 
-import 'package:remembox/src/model.dart' show LinkType;
+import 'package:remembox/src/model.dart'
+    show LinkType, MemoryKind, ThreadStates;
 import 'package:test/test.dart';
 
 const _templates = [
@@ -23,6 +25,10 @@ const _templates = [
   'templates/instructions-for-claude.md',
   'templates/global-CLAUDE.md',
 ];
+
+/// The thread states the templates use (the cockpit legend) – the fixed
+/// set of the model (0.5.0).
+const _stateValues = ThreadStates.all;
 
 /// The single line in [path] that starts with [prefix] (the paste block is
 /// one line inside a ```text fence).
@@ -125,6 +131,43 @@ void main() {
     }
   });
 
+  test('the release ships hooks/cockpit-sync-hook.sh, copied from '
+      'tool/hooks/, and the acceptance test checks it', () {
+    final release = File('tool/release.sh').readAsStringSync();
+    expect(
+      RegExp(r'^KEEP_ITEMS="[^"]*\bhooks\b', multiLine: true)
+          .hasMatch(release),
+      isTrue,
+      reason: 'tool/release.sh must keep hooks/ in the zip',
+    );
+    expect(
+      release,
+      contains(r'cp "$STAGE/tool/hooks/cockpit-sync-hook.sh" '
+          r'"$STAGE/hooks/cockpit-sync-hook.sh"'),
+    );
+    expect(release, contains(r'chmod 755 "$STAGE/hooks/cockpit-sync-hook.sh"'));
+    // The copy happens before the cleanup, so the final trace gate (5b)
+    // scans the assembled hooks/ together with the rest.
+    expect(
+      release.indexOf(r'cp "$STAGE/tool/hooks/'),
+      lessThan(release.indexOf('KEEP_ITEMS=')),
+    );
+    expect(
+      release.indexOf('KEEP_ITEMS='),
+      lessThan(release.indexOf('final assembled tree, incl. binaries')),
+    );
+    final acceptance = File('tool/release_acceptance.sh').readAsStringSync();
+    expect(acceptance, contains('remembox/hooks/cockpit-sync-hook.sh'));
+    expect(
+      File('tool/release_acceptance.dart').readAsStringSync(),
+      allOf(
+        contains('hooks/cockpit-sync-hook.sh'),
+        // Run without REMEMBOX_BIN: the script must find the launcher.
+        isNot(contains("'REMEMBOX_BIN'")),
+      ),
+    );
+  });
+
   group('release acceptance layout (unpack in tool/release_acceptance.sh)',
       () {
     late Directory tmp;
@@ -136,7 +179,12 @@ void main() {
 
     /// Builds a synthetic release-shaped zip (empty placeholder files,
     /// executable launcher/binary) with or without templates/.
-    String makeZip(String name, {required bool withTemplates}) {
+    String makeZip(
+      String name, {
+      required bool withTemplates,
+      bool withHook = true,
+      bool hookExecutable = true,
+    }) {
       final root = Directory('${tmp.path}/$name/remembox');
       final files = [
         'dist/remembox',
@@ -145,8 +193,10 @@ void main() {
         'skill/SKILL.md',
         'README.md',
         'LICENSE',
-        if (withTemplates)
+        if (withTemplates) ...[
           for (final t in _templates) t,
+          if (withHook) 'hooks/cockpit-sync-hook.sh',
+        ],
       ];
       for (final f in files) {
         File('${root.path}/$f')
@@ -157,6 +207,8 @@ void main() {
         '+x',
         '${root.path}/dist/remembox',
         '${root.path}/dist/bin/remembox',
+        if (withTemplates && withHook && hookExecutable)
+          '${root.path}/hooks/cockpit-sync-hook.sh',
       ]);
       final zip = '${tmp.path}/$name.zip';
       final r = Process.runSync('zip', [
@@ -191,6 +243,24 @@ void main() {
       expect(r.stderr, contains('does not contain remembox/templates/'));
     });
 
+    test('the zip under test must contain an executable hook script', () {
+      final missing = makeZip('nohook', withTemplates: true, withHook: false);
+      var r = unpack(missing, 'd', 'current');
+      expect(r.exitCode, isNot(0));
+      expect(
+        r.stderr,
+        contains('does not contain remembox/hooks/cockpit-sync-hook.sh'),
+      );
+      final plain = makeZip(
+        'plainhook',
+        withTemplates: true,
+        hookExecutable: false,
+      );
+      r = unpack(plain, 'e', 'current');
+      expect(r.exitCode, isNot(0));
+      expect(r.stderr, contains('executable remembox/hooks/cockpit-sync-hook.sh'));
+    });
+
     test('a previous release without templates/ is accepted', () {
       final old = makeZip('old', withTemplates: false);
       final r = unpack(old, 'c', 'previous');
@@ -214,8 +284,16 @@ void main() {
     final keys = _schemaKeys(File('lib/src/server.dart').readAsStringSync());
     expect(keys, containsAll(['sourceType', 'addAreas', 'addAliases']));
     final template = File('templates/global-CLAUDE.md').readAsStringSync();
-    // Values, not arguments: a tag example and the link types.
-    final tagExamples = {'deadEnd', ...LinkType.all};
+    // Values, not arguments: the memory kinds, the link types and how a
+    // link reads from its target, and the thread-state values and the
+    // pause date attribute of the cockpit legend.
+    final tagExamples = {
+      ...MemoryKind.all,
+      ...LinkType.all,
+      'hasPart',
+      ..._stateValues,
+      'pausedUntil',
+    };
     final named = {
       for (final m in RegExp(r'`([a-z]+[A-Z][A-Za-z0-9]*)`').allMatches(
         template,
@@ -224,6 +302,22 @@ void main() {
     }.difference(tagExamples);
     expect(named, isNotEmpty);
     expect(named.difference(keys), isEmpty, reason: 'unknown argument names');
+  });
+
+  test('the cockpit legend and the global rules use the same state '
+      'values', () {
+    final cockpit = File('templates/cockpit.md').readAsStringSync();
+    final legend = cockpit
+        .split('\n')
+        .singleWhere((l) => l.startsWith('> **State markers**'));
+    for (final value in _stateValues) {
+      expect(legend, contains(value), reason: 'cockpit legend: $value');
+    }
+    // 0.5.0: a thread's state is set with thread_update, not a fact.
+    final rules = File('templates/global-CLAUDE.md').readAsStringSync();
+    expect(rules, contains('`thread_update`'));
+    expect(rules, isNot(contains('attribute `state`')));
+    expect(rules, contains('`inProgress`'));
   });
 
   test('every tool named in the short block is a registered tool', () {

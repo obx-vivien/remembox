@@ -188,7 +188,7 @@ RememBox only works reliably if the assistant gets its usage rules at the start 
 - **Claude Code:** `~/.claude/CLAUDE.md` as well – Claude Code reads this file at the start of every session; the other clients do not read it.
 
 ```text
-Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember). Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Say what an entry is with its kind (decision, lesson, deadEnd, snapshot, …), not with a tag. A status change is ONE call: thread_update (state, eventAt when known, optional note); exact values that change over time (a rent, an address) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember; partOf = A belongs to B). Maintenance tools (project_merge, entries_move, entries_update, kind_migrate, tag_merge, tag_remove, tag_retire, tags_normalize, attribute_define) only when I explicitly ask.
 ```
 
 Ready-to-copy versions of the whole setup ship in `templates/` – in this repository and in the release ZIP:
@@ -249,14 +249,47 @@ cp ~/remembox/skill/SKILL.md ~/.claude/skills/remembox-memory/SKILL.md
 
 That installs it for Claude Code. Claude Desktop and Cowork take the same file as a personal skill upload instead, through the app's skill settings – those surfaces do not read `CLAUDE.md` and do not read from `~/.claude/skills/`. Either way a skill is loaded only when the topic matches, so it is the detail layer on top of the always-loaded block from step 4, not a replacement for it.
 
+**Keeping the cockpit's thread section current (optional, Claude Code).** The release ZIP also contains a hook script, `hooks/cockpit-sync-hook.sh` (`<unzip dir>/remembox/hooks/cockpit-sync-hook.sh`; in the repository `tool/hooks/cockpit-sync-hook.sh`). Wired into Claude Code's `SessionStart` and `Stop` hooks, it runs `remembox cockpit-sync` and re-renders the generated thread section of your cockpit file. It finds the launcher by itself (`../dist/remembox` next to the script; `REMEMBOX_BIN` overrides this), is quiet and fail-open (it always exits 0; a failure is one line in the compare log), and does nothing until `OBX_MEMORY_COCKPIT_FILE` is set. Nothing installs it for you – add this to your Claude Code `settings.json` (`~/.claude/settings.json`) and replace the two placeholder paths:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OBX_MEMORY_COCKPIT_FILE=\"$HOME/path/to/cockpit.md\" /path/to/remembox/hooks/cockpit-sync-hook.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OBX_MEMORY_COCKPIT_FILE=\"$HOME/path/to/cockpit.md\" /path/to/remembox/hooks/cockpit-sync-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The script needs the file to be executable (it is, as shipped). A symlink to it works; a copy somewhere else does not find `dist/` and needs `REMEMBOX_BIN` set to the launcher. The compare log defaults to `~/Library/Logs/remembox/cockpit-compare.log` on macOS and `${XDG_STATE_HOME:-~/.local/state}/remembox/cockpit-compare.log` elsewhere (`OBX_MEMORY_COCKPIT_LOG`). Details: the [usage guide](docs/usage-guide.md#the-cockpit-section).
+
 The important rules are simple:
 
 - **Recall first** when previous context could change the answer.
 - **Scope memories by `project` or topic** so unrelated context stays separate.
 - **Remember durable conclusions**, not whole transcripts.
 - **Store decisions with reasoning** as `decision` entries.
-- **Remember dead ends** as `episode` entries so they are not rediscovered.
-- **Add dated status snapshots** as `fact` entries tagged `status` when a project reaches a meaningful new state.
+- **Remember dead ends** as `deadEnd` entries so they are not rediscovered, and takeaways as `lesson` entries.
+- **Set the state of a thread with one `thread_update` call** when a project reaches a meaningful new state – with the dated status report as its `note` (stored as a `snapshot` entry).
 - **Supersede stale facts** instead of accumulating contradictions.
 - **Link related memories** when the relationship is useful later.
 - **Keep the cockpit current** when a topic's status or next action changes.
@@ -280,7 +313,7 @@ MCP is the interface. ObjectBox is the embedded database and vector-search engin
 
 ### The memory path
 
-1. **`remember`** – Claude stores a memory with a kind (`fact`, `decision`, `preference`, `episode`, `reference`) and a required `project` scope. Duplicates are detected on normalized text.
+1. **`remember`** – Claude stores a memory with a kind (`fact`, `decision`, `preference`, `episode`, `reference`, `snapshot`, `lesson`, `deadEnd`) and a required `project` scope. Duplicates are detected on normalized text.
 2. **Embed locally** – a local [Ollama](https://ollama.com) model turns the text into a vector. No remote embedding API is used.
 3. **Store** – memory and vector go into an embedded ObjectBox database in one transaction.
 4. **`recall` by meaning** – a later query is embedded the same way and matched using ObjectBox's built-in HNSW nearest-neighbour search, filtered by project and ranked by semantic similarity with small recency and frequency boosts.
@@ -300,17 +333,18 @@ flowchart LR
 
 Memories are stored as typed entities, not isolated text rows.
 
-Every memory can be linked to others with typed relationships:
+Every memory can be linked to others with typed relationships, each with a fixed direction – for `link(A, B, type)`:
 
-- `parent`
-- `child`
-- `related`
-- `contradicts`
-- `derivedFrom`
+- `derivedFrom` – A follows from B
+- `contradicts` – A contradicts B
+- `partOf` – A belongs to B (B has A as a part)
+- `related` – undirected
+
+The older `parent` and `child` have no defined direction; existing links stay valid, and the strict registry mode rejects new ones in favour of `partOf`.
 
 Every `supersede` also adds a forward link from the old version to the new one.
 
-`recall` and `get` return those relationships with a hit, so the assistant can receive not only a fact but relevant context around it: the decision it came from, a note it contradicts, its source, or related project history.
+`recall` and `get` return those relationships with a hit, each read from the entry's own side (`relation`: `partOf` on the part, `hasPart` on the whole; `derivedFrom`/`sourceOf`; `contradicts`/`contradictedBy`), so the assistant can receive not only a fact but relevant context around it: the decision it came from, a note it contradicts, its source, the steps of a plan, or related project history.
 
 ## Design decisions
 
@@ -333,7 +367,7 @@ Every `supersede` also adds a forward link from the old version to the new one.
 | `supersede` | Replace a memory with a corrected version while preserving and linking the old one. |
 | `link` / `unlink` | Create or remove typed relationships between memories. |
 | `forget` | Soft-forget by default; `hard=true` deletes permanently. |
-| `list_recent` | Show recent memories. |
+| `list_recent` | Show recent memories, filterable by project, area and kind (e.g. every `deadEnd` of a project). |
 | `stats` | Inspect store and index health. |
 | `reindex` | Rebuild the vector index. |
 | `area_set` / `project_set` | Create or update a life/work area, or a project's description, status and area membership. |
@@ -342,6 +376,11 @@ Every `supersede` also adds a forward link from the old version to the new one.
 | `fact_forget` | Retract a fact, close it as of a date, or delete it permanently. |
 | `tags_list` / `tag_merge` / `tag_remove` / `tags_normalize` | List tags with live usage counts, variant groups and whether each is registered (with its description); merge spelling variants into one tag; remove tags; one-shot upgrade helper that normalizes every pre-0.3.0 tag spelling. |
 | `tag_define` | Register a tag with a one-sentence description and optional aliases (old spellings, synonyms – e.g. `chores` for `housework`; `aliases` replaces the set, `addAliases`/`removeAliases` change single ones), or update them. A write that uses an alias stores the tag. In strict registry mode only registered tags (and their aliases) can be used. |
+| `tag_retire` | Retire a tag that must no longer be written, with a hint saying what to do instead; its aliases are retired with it. Strict mode rejects a write naming it, open mode warns. |
+| `attribute_define` / `attributes_list` | Register a fact attribute with a description and optional allowed values (e.g. `stage`: `contacted` … `won`); `fact_set` then takes only those (strict) or warns (open). List the registered attributes with their values and the current facts that do not fit. |
+| `thread_update` / `thread_list` / `thread_get` | A thread is a concrete matter with a state (`inProgress`, `waiting`, `paused`, … `done`). One `thread_update` call creates it or changes its state – with the date it became true when known, a status report as `note`, attached entries, an optimistic `expectedVersion` and a retry-safe `idempotencyKey`; late information is kept as history. List threads, or read one with its full state history and its entries. `remember`/`supersede` take `threadId`. |
+| `remembox cockpit-sync` (command, not a tool) | Writes the live threads into a generated section of your cockpit file and logs how the hand-written lines compare – see the [usage guide](docs/usage-guide.md#threads); a ready-made Claude Code hook script ships as `hooks/cockpit-sync-hook.sh` in the ZIP. |
+| `entries_update` / `kind_migrate` | Change the kind and tags of selected entries in place; move old marker tags (`deadEnd`, `learning`, `status`) to kinds in one pass, with a review list for entries that do not fit. Text, links, history and the search index stay untouched. |
 
 ## Project scope
 
@@ -356,7 +395,7 @@ This is the technical mechanism behind the user-facing topic scopes described ab
 - `sourceType`
 - `area` – every project assigned to that area via `area_set`/`project_set`
 
-`list_recent` filters the same way by `project` and `area`. Tags are labels, not a recall filter.
+`list_recent` filters by `project`, `area` and `kind` – unlike `recall`, whose kind filter runs after the nearest-neighbour search, it lists every entry of a kind. Tags are labels, not a recall filter.
 
 The supplied skill teaches Claude to set project names consistently. The server also validates this itself so the rule does not depend only on prompt compliance.
 
@@ -383,7 +422,7 @@ Common variables include:
 - `OBX_MEMORY_DIR` – default `~/.remembox`
 - `OBX_MEMORY_EMBED_MODEL` – default `embeddinggemma`
 - `OBX_MEMORY_SYNC_URL` – unset means local only
-- `OBX_MEMORY_REGISTRY_MODE` – `open` (default): a new project name is registered on first write (logged), a new tag is simply created; nothing is rejected, warnings only for near-duplicates and merged project names. `strict` rejects writes with an unregistered project or tag (register with `project_set` / `tag_define` first)
+- `OBX_MEMORY_REGISTRY_MODE` – `open` (default): a new project name is registered on first write (logged), a new tag is simply created; nothing is rejected, warnings only for near-duplicates, merged project names, retired tags and values outside a registered attribute's allowed set. `strict` rejects writes with an unregistered project or tag, a retired tag, a `parent`/`child` link or a value outside a registered attribute's allowed set (register with `project_set` / `tag_define` / `attribute_define` first)
 
 The full configuration, including daemon caps and ranking weights, is documented in [docs/configuration.md](docs/configuration.md).
 

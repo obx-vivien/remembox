@@ -33,9 +33,19 @@
 /// `projects`/`mergedProjects`/`registryMode`, `stats.registry`
 /// `mode`/`tagDefinitions`/`tagAliases`,
 /// the merge and remove tools' `definitionsRemoved`/`intoDefinition`/
-/// `carriedFrom`/`aliasesAdded`/`aliasesRemoved`, and `reindex`'s
-/// `nearDuplicates`. The fixture itself is never edited: a key is only
-/// ever added to this drop list, so everything main produced is still
+/// `carriedFrom`/`aliasesAdded`/`aliasesRemoved`, `reindex`'s
+/// `nearDuplicates`, and (0.5.0) the `stats.byKind` counts of the new kinds
+/// `snapshot`/`lesson`/`deadEnd`, `stats.registry` `tagRetirements`/
+/// `attributeDefinitions` and `stats.threads`. The fixture itself is never
+/// edited: a key
+/// is only ever added to this drop list, so everything main produced is
+/// still compared.
+///
+/// Re-captured once, for 0.5.0: the supersede step used the tag `lesson`,
+/// which became a memory kind (and with it a tag that is dropped on
+/// write). The script now uses `todo` there instead and the fixture was
+/// re-captured from main with the procedure above – the only script
+/// change, so main's behaviour for every other step is still what is
 /// compared.
 ///
 /// Synthetic data only: projects `acme-app`, `garden`, `family`; area
@@ -113,7 +123,16 @@ Object? _normalizeStep(String tool, Object? output) {
     (out['registry'] as Map<String, Object?>)
       ..remove('mode')
       ..remove('tagDefinitions')
-      ..remove('tagAliases');
+      ..remove('tagAliases')
+      ..remove('tagRetirements')
+      ..remove('attributeDefinitions');
+    // 0.5.0: three new kinds, each with its own (zero) count.
+    (out['byKind'] as Map<String, Object?>)
+      ..remove('snapshot')
+      ..remove('lesson')
+      ..remove('deadEnd');
+    // 0.5.0: the thread counts.
+    out.remove('threads');
   }
   if (tool == 'reindex') {
     (out['registry'] as Map<String, Object?>).remove('nearDuplicates');
@@ -251,7 +270,7 @@ void main() {
         idOf(seed),
         text: 'contact seed for the golden run, corrected',
         project: 'garden',
-        tags: ['contact', 'lesson'],
+        tags: ['contact', 'todo'],
       ),
     );
     await step(

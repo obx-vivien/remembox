@@ -25,13 +25,14 @@
 #      calling tool/setup.sh (dylib download + codegen) and tool/build.sh
 #      (exe + launcher) — never by copying the worktree's dylib.
 #   5. Assemble the release ZIP layout: top-level remembox/ containing
-#      dist/, skill/SKILL.md, templates/ (cockpit, Instructions for Claude
-#      block, global-CLAUDE.md – the setup a user copies), LICENSE,
-#      README.md.
+#      dist/, hooks/cockpit-sync-hook.sh (the Claude Code hook script, mode
+#      755 – it finds ../dist/remembox on its own), skill/SKILL.md,
+#      templates/ (cockpit, Instructions for Claude block, global-CLAUDE.md
+#      – the setup a user copies), LICENSE, README.md.
 #   5b. Personal-trace gate, final pass: re-scan the fully assembled tree,
-#      now including dist/'s compiled binaries, skill/SKILL.md, templates/,
-#      LICENSE and README.md – dist/ did not exist yet for step 3's pass
-#      (templates/ is covered by both passes: step 3 scans the whole
+#      now including dist/'s compiled binaries, hooks/, skill/SKILL.md,
+#      templates/, LICENSE and README.md – dist/ did not exist yet for
+#      step 3's pass (templates/ is covered by both passes: step 3 scans the whole
 #      archived tree, step 5b the whole assembled one). Scans
 #      binary content via raw byte grep, not `strings` (see the comment on
 #      run_trace_gate below for why), so this subsumes what used to be a
@@ -384,6 +385,8 @@ echo "==> Built: $STAGE/dist (lib: $(basename "$LIB_BUILT"))"
 # --- 5. Assemble the release layout ----------------------------------------
 # remembox/
 #   dist/          <- launcher + bin/remembox + lib/libobjectbox.dylib
+#   hooks/cockpit-sync-hook.sh   <- Claude Code hook script (from
+#                     tool/hooks/, mode 755)
 #   skill/SKILL.md
 #   templates/     <- cockpit.md, instructions-for-claude.md,
 #                     global-CLAUDE.md (setup files the user copies)
@@ -435,13 +438,32 @@ for template in cockpit.md instructions-for-claude.md global-CLAUDE.md; do
 done
 find "$STAGE/templates" -type f -exec chmod 644 {} +
 
+# The Claude Code hook script (runs `remembox cockpit-sync`) lives in
+# tool/hooks/ in the repository and ships as hooks/ in the zip, next to
+# dist/, which is where the script looks for the launcher. ZIP users never
+# clone the repository, so a release never ships silently without it. The
+# mode is set explicitly (not inherited from the archive). Created before
+# the cleanup below, so the final trace gate (5b) scans it with the rest of
+# the assembled tree.
+if [ ! -f "$STAGE/tool/hooks/cockpit-sync-hook.sh" ]; then
+  echo "ERROR: tool/hooks/cockpit-sync-hook.sh missing from the archived tree" >&2
+  exit 1
+fi
+mkdir -p "$STAGE/hooks"
+cp "$STAGE/tool/hooks/cockpit-sync-hook.sh" "$STAGE/hooks/cockpit-sync-hook.sh"
+chmod 755 "$STAGE/hooks/cockpit-sync-hook.sh"
+if [ ! -x "$STAGE/hooks/cockpit-sync-hook.sh" ]; then
+  echo "ERROR: hooks/cockpit-sync-hook.sh was not staged as an executable" >&2
+  exit 1
+fi
+
 # Everything not part of the shipped layout stays out of the zip: remove
 # the rest of the archived tree (source, tests, tool/, docs/, pubspec*,
 # .gitattributes/.gitignore, and .dart_tool/ left behind by `dart pub get`
 # / build_runner in step 4) now that dist/ has been produced from it. Keep
 # only what step 6 lists. dotglob is required — bare `*` does not match
 # dotfiles/dotdirs in bash, which would otherwise ship .dart_tool etc.
-KEEP_ITEMS="dist skill templates $LICENSE_FILE README.md"
+KEEP_ITEMS="dist hooks skill templates $LICENSE_FILE README.md"
 shopt -s dotglob
 for entry in "$STAGE"/*; do
   name="$(basename "$entry")"
@@ -456,9 +478,9 @@ echo "==> Release contents:"
 ls -la "$STAGE" | sed 's/^/    /'
 
 # --- 5b. Personal-trace gate, final pass ------------------------------------
-# Re-scan now that skill/SKILL.md, templates/, LICENSE, README.md and
-# dist/ (including the compiled binaries) are all in place – step 3's pass
-# ran before dist/ existed, and before the release layout was assembled.
+# Re-scan now that hooks/, skill/SKILL.md, templates/, LICENSE, README.md
+# and dist/ (including the compiled binaries) are all in place – step 3's
+# pass ran before dist/ existed, and before the release layout was assembled.
 # "full" mode covers binary content too, so this subsumes what used to be
 # a separate binary-strings gate (see run_trace_gate's comment for why
 # `strings` cannot be used for that).

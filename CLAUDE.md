@@ -94,6 +94,64 @@ name as a tag; do not resolve aliases anywhere else. Only aliases of a
 REGISTERED tag resolve. `tag_define`/`tag_merge` manage them, and
 `_aliasConflict` is the one rule for what may become an alias.
 
+## 0.5.0: kinds, retired tags, attribute values, in-place edits
+
+- **Additive only, again:** `TagRetirement`, `AttributeDefinition` and
+  `AttributeValue` are new entities (ids 12–14); no shipped entity gained
+  a property (a Sync peer on an older model would drop it silently).
+  Pinned by `test/model_compat_test.dart` against
+  `test/fixtures/objectbox-model-0.4.0.json`.
+- **Retired tags are checked in `_prepareTags` Step 1a** – after
+  normalization, before alias resolution, only when any `TagRetirement`
+  row exists. Strict mode collects them for the one Step 2c rejection,
+  open mode warns. Do not check retirements anywhere else on the write
+  path; the tag_define/tag_merge guards use `_retiredClause`.
+- **An alias named like a memory kind is inert** (`_isKindName`): neither
+  Step 1b nor `_resolveAliasTarget` resolves it – the kind wins, the tag
+  is dropped as redundant.
+- **`_checkAttributeValue` (memory_service_attributes.dart) is the single
+  place** a `fact_set` value is checked against the attribute register.
+  It runs inside the write transaction right after
+  `_requireWritableProject` and returns at once while no attribute is
+  registered.
+- **In-place edits never touch text, `contentHash` or the index:**
+  `entries_update`/`kind_migrate` (memory_service_entries.dart) change
+  only `kind` and the tags relation; keep it that way (a test pins
+  `reindex` → `reembedded: 0`).
+- Open-mode changes in 0.5.0 are deliberate and listed in CHANGELOG
+  ("Behaviour changes in open mode"); everything else stays pinned by the
+  open-mode golden.
+
+## Threads (0.5.0): `Thread`, `ThreadState`, `ThreadEntry`, `ThreadOp`
+
+- **Additive again** (ids 15–18, pinned by `test/model_compat_test.dart`).
+  `ThreadOp` is local-only (idempotency trace, plain `threadId`); the
+  other three are `@Sync()` without any `@Unique` property.
+- **"At most one live thread per (project, titleKey)" is a write-path
+  rule**, query-first inside `thread_update`'s single write transaction
+  (memory_service_threads.dart) – like `Fact.factKey`, not a schema
+  constraint. Every check runs before the first put; the note is
+  embedded BEFORE the lending.
+- **The current state is the newest non-`asHistory` `ThreadState` row by
+  (recordedAt, id)**; `Thread.state/stateEventAt/stateRecordedAt` are a
+  copy recomputed by every `thread_update`. `thread_get` is read-only: it
+  reports a disagreement, never repairs it.
+- **`version` changes only with state rows, renames, moves and
+  `pausedUntil`** – never with attachments. Thread states are the fixed
+  set `ThreadStates`, not the attribute register.
+- **`remembox cockpit-sync` (lib/src/cockpit_sync.dart) is the second
+  sanctioned opener of a store**: a short-lived CLI run, one gated
+  `StoreGate` lending behind `store.lock`, no embedder, sharing
+  `readThreadRows` with `thread_list`. It never creates a store, keeps
+  its backup next to the compare log (never next to the cockpit),
+  rewrites the cockpit in place only after the sha256/mtime re-check
+  right before the write, never writes a section from a truncated read,
+  and logs the comparison outside the store directory. `bin/remembox.dart`
+  ends it with `io.exit` – a timed-out startup probe leaves a lock
+  request pending that would otherwise keep the process alive. Tests point
+  `OBX_MEMORY_COCKPIT_FILE`/`OBX_MEMORY_COCKPIT_LOG`/`OBX_MEMORY_DIR` at
+  temp paths, always.
+
 ## Setup templates (`templates/`)
 
 `templates/` is user-facing and ships in the release ZIP: everything in

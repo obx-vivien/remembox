@@ -29,7 +29,43 @@ abstract final class MemoryKind {
   static const episode = 'episode';
   static const reference = 'reference';
 
-  static const all = [fact, decision, preference, episode, reference];
+  // 0.5.0 – formerly marker tags, now kinds (filterable on recall and
+  // list_recent, so a tag of the same name is dropped as redundant).
+
+  /// A dated status report on a thread (the current state itself is set
+  /// with `thread_update`, see [Thread]).
+  static const snapshot = 'snapshot';
+
+  /// What to apply next time – a takeaway from something that happened.
+  static const lesson = 'lesson';
+
+  /// A dropped approach and why – check these before a new attempt.
+  static const deadEnd = 'deadEnd';
+
+  static const all = [
+    fact,
+    decision,
+    preference,
+    episode,
+    reference,
+    snapshot,
+    lesson,
+    deadEnd,
+  ];
+
+  /// One line per kind, in [all] order – the text tool descriptions use.
+  static const meanings = {
+    fact: 'knowledge that holds',
+    decision: 'a choice and its reason',
+    preference: 'how the operator wants things done',
+    episode: 'something that happened',
+    reference: 'where something is (a document, a link)',
+    snapshot:
+        'a dated status report on a thread (the current state itself '
+        'is set with thread_update)',
+    lesson: 'what to apply next time',
+    deadEnd: 'a dropped approach and why – check these before a new attempt',
+  };
 
   static bool isValid(String value) => all.contains(value);
 }
@@ -47,6 +83,15 @@ abstract final class MemorySource {
 }
 
 /// Semantic link types between memories ([MemoryLink.linkType]).
+///
+/// Directions are fixed (0.5.0). For `link(fromId: A, toId: B, type)`:
+/// - [derivedFrom]: A follows from B (B is the source of A).
+/// - [contradicts]: A contradicts B.
+/// - [partOf]: A belongs to B (B has A as a part).
+/// - [related]: undirected.
+/// - [parent]/[child]: legacy – their direction was never defined. Still
+///   accepted in open registry mode and kept in [all] so existing links
+///   stay valid; strict registry mode rejects new ones ([legacy]).
 abstract final class LinkType {
   static const parent = 'parent';
   static const child = 'child';
@@ -54,9 +99,29 @@ abstract final class LinkType {
   static const contradicts = 'contradicts';
   static const derivedFrom = 'derivedFrom';
 
-  static const all = [parent, child, related, contradicts, derivedFrom];
+  /// A belongs to B – the directed replacement for [parent]/[child].
+  static const partOf = 'partOf';
+
+  static const all = [parent, child, related, contradicts, derivedFrom, partOf];
+
+  /// Types whose direction is undefined; rejected for new links in strict
+  /// registry mode.
+  static const legacy = {parent, child};
 
   static bool isValid(String value) => all.contains(value);
+
+  /// How a link of [type] reads from one end: [outgoing] is the `from`
+  /// entry's view (`partOf`), otherwise the `to` entry's (`hasPart`). Used
+  /// for the `relation` field `get`/`recall` add to each link. [related]
+  /// reads the same both ways; legacy and unknown types are returned
+  /// unchanged.
+  static String relationFrom(String type, {required bool outgoing}) =>
+      switch (type) {
+        partOf => outgoing ? partOf : 'hasPart',
+        derivedFrom => outgoing ? derivedFrom : 'sourceOf',
+        contradicts => outgoing ? contradicts : 'contradictedBy',
+        _ => type,
+      };
 }
 
 /// Health of a [MemoryIndex] row.
@@ -817,6 +882,467 @@ class TagAlias {
     this.id = 0,
     required this.name,
     required this.tag,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc();
+}
+
+// ---------------------------------------------------------------------------
+// Retired tags and attribute values (0.5.0)
+// ---------------------------------------------------------------------------
+//
+// Three new entities instead of new properties on shipped ones: a property
+// added to an existing entity changes that entity's model (property count,
+// lastPropertyId), and a Sync peer still running an older binary would
+// silently drop the field it does not know. New entities leave every
+// shipped entity byte-identical (additive-only schema, see CLAUDE.md).
+
+/// A tag name that must no longer be written: `tag_retire` marks it, with a
+/// [hint] saying what to do instead (`status` – "use thread_update for the
+/// state and kind snapshot for the report"). In strict registry mode a write naming
+/// a retired tag is rejected; in open mode it is stored with a warning.
+/// Checked in `_prepareTags` (Step 1a), the single place for tag rules –
+/// only when any row exists, so a store without retirements takes the old
+/// path.
+///
+/// One row per retired NAME: the tag itself ([aliasOf] `''`) and every
+/// alternative name retired with it ([aliasOf] = the retired tag), so a
+/// write using an old alias is caught even after its `TagAlias` row is
+/// gone. Independent of [TagDefinition]/[TagAlias]/[Tag]: retiring a tag
+/// neither removes its definition nor touches the entries that carry it
+/// (`kind_migrate`/`entries_update` do that), and `tag_remove` never
+/// deletes a retirement.
+///
+/// Name-keyed, NO relation – same reason as [TagAlias]: a cross-device
+/// replace on a unique name mints a new local id, which would leave a
+/// ToOne dangling.
+///
+/// `@Sync()`: replicates with the vocabulary it restricts.
+@Entity()
+@Sync()
+class TagRetirement {
+  @Id()
+  int id = 0;
+
+  /// The retired name, normalized like a tag (`_normalizeTag`) – exact and
+  /// case-sensitive. Replace-on-conflict is Sync-mandated – see
+  /// [MemoryEntry.contentHash]; the local write path is query-first in a
+  /// write transaction (`tagRetire`). Value-indexed, not hash – see
+  /// "Unique value index" above.
+  @Unique(onConflict: ConflictStrategy.replace)
+  @Index(type: IndexType.value)
+  String name;
+
+  /// What to do instead, one sentence (non-blank on create, enforced by
+  /// the write path; cap `descriptionMaxLen`). Every row of one retirement
+  /// carries the same hint.
+  String hint;
+
+  /// `''` for the retired tag itself; for an alternative name retired with
+  /// it, the retired tag's [name]. Value-indexed, so every name retired
+  /// with one tag is a single indexed lookup.
+  @Index(type: IndexType.value)
+  String aliasOf;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime createdAt;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime updatedAt;
+
+  TagRetirement({
+    this.id = 0,
+    required this.name,
+    required this.hint,
+    this.aliasOf = '',
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc(),
+       updatedAt = updatedAt ?? createdAt ?? DateTime.now().toUtc();
+}
+
+/// Registered fact attribute (`attribute_define`): a one-sentence
+/// [description] and, optionally, the allowed text values
+/// ([AttributeValue] rows). A definition without values only describes the
+/// attribute; one with values restricts `fact_set` – strict registry mode
+/// rejects any other value, open mode stores it with a warning. Checked in
+/// `_checkAttributeValue` (memory_service_attributes.dart), the single
+/// place for this rule, and only when any definition exists.
+///
+/// Name-keyed, NO relation to [Fact] or [AttributeValue] – same reason as
+/// [TagDefinition].
+///
+/// `@Sync()`: user-authored vocabulary that must replicate with the facts
+/// it describes.
+@Entity()
+@Sync()
+class AttributeDefinition {
+  @Id()
+  int id = 0;
+
+  /// Exactly the [Fact.attribute] string it describes – case-sensitive,
+  /// never normalized (fact attributes are byte-exact). Replace-on-conflict
+  /// is Sync-mandated – see [MemoryEntry.contentHash]; the local write path
+  /// is query-first in a write transaction (`attributeDefine`).
+  /// Value-indexed, not hash – see "Unique value index" above.
+  @Unique(onConflict: ConflictStrategy.replace)
+  @Index(type: IndexType.value)
+  String name;
+
+  /// What the attribute records, one sentence. Non-blank on create
+  /// (enforced by the write path); cap `descriptionMaxLen`.
+  String description;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime createdAt;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime updatedAt;
+
+  AttributeDefinition({
+    this.id = 0,
+    required this.name,
+    required this.description,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc(),
+       updatedAt = updatedAt ?? createdAt ?? DateTime.now().toUtc();
+}
+
+/// One allowed text value of a registered attribute
+/// ([AttributeDefinition]): `state` allows `backlog`, `inProgress`, `done`,
+/// …. [position] keeps the order the values were given in (display order).
+///
+/// Name-keyed via the synthetic [key] (attribute + [kFactKeySep] + value),
+/// NO relation – same reason as [AreaMembership]: a cross-device replace of
+/// an identical key changes nothing semantically.
+///
+/// `@Sync()`: replicates with its definition.
+@Entity()
+@Sync()
+class AttributeValue {
+  @Id()
+  int id = 0;
+
+  /// `attribute + [kFactKeySep] + value` ([keyFor]) – one row per allowed
+  /// value. Replace-on-conflict is Sync-mandated – see
+  /// [MemoryEntry.contentHash]; the local write path is query-first in a
+  /// write transaction. Value-indexed, not hash – see "Unique value index"
+  /// above.
+  @Unique(onConflict: ConflictStrategy.replace)
+  @Index(type: IndexType.value)
+  String key;
+
+  /// Exactly [AttributeDefinition.name]. Value-indexed, so every value of
+  /// one attribute is a single indexed lookup.
+  @Index(type: IndexType.value)
+  String attribute;
+
+  /// The allowed value, exact and case-sensitive (compared with
+  /// [Fact.valueText]).
+  String value;
+
+  /// Display order within the attribute (0-based).
+  int position;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime createdAt;
+
+  AttributeValue({
+    this.id = 0,
+    required this.key,
+    required this.attribute,
+    required this.value,
+    this.position = 0,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc();
+
+  /// Canonical [key] for an (attribute, value) pair – the ONE place this
+  /// composite is built. The write path rejects control characters (and
+  /// with them [kFactKeySep]) in both parts, so the key cannot be forged.
+  static String keyFor(String attribute, String value) =>
+      '$attribute$kFactKeySep$value';
+}
+
+// ---------------------------------------------------------------------------
+// Threads (0.5.0)
+// ---------------------------------------------------------------------------
+//
+// Four new entities instead of new properties on shipped ones (additive-
+// only schema, see CLAUDE.md). A thread is a concrete matter with a state
+// that will be done one day; entries belong to it via [ThreadEntry]. The
+// state history is one [ThreadState] row per asserted state.
+//
+// Sync caveats (same style as [Fact]): [Thread], [ThreadState] and
+// [ThreadEntry] carry no `@Unique` property, so the Sync-mandated replace
+// hazard (a new local id on a cross-device replace) does not exist for
+// them. "At most one LIVE thread per (project, titleKey)" is therefore a
+// write-path rule (query-first in one write transaction,
+// memory_service_threads.dart), exactly like "one current fact per key"
+// – two devices can still create the same title independently; then
+// `thread_update` by title finds two live rows and rejects the call with
+// both ids ("pass threadId"), `thread_list` shows both – never a silent
+// pick. [Thread.version] is a per-device optimistic check: across devices
+// the last write wins, as for every other synced row. [ThreadEntry.entry]
+// can dangle after a cross-device [MemoryEntry.contentHash] replace – the
+// same, documented hazard as [MemoryLink]; `thread_get` reports such rows
+// as `missingEntryIds` with a warning instead of hiding them.
+
+/// The states a thread can be in – a fixed set (not the attribute
+/// register): filters, closed-detection and the cockpit symbols all depend
+/// on it. [done] and [dropped] END a thread; every other state is live.
+/// [symbols] is shared by the cockpit renderer and parser
+/// (lib/src/cockpit_sync.dart).
+abstract final class ThreadStates {
+  static const backlog = 'backlog';
+  static const planned = 'planned';
+  static const inProgress = 'inProgress';
+  static const waiting = 'waiting';
+  static const paused = 'paused';
+  static const done = 'done';
+  static const dropped = 'dropped';
+
+  static const all = [
+    backlog,
+    planned,
+    inProgress,
+    waiting,
+    paused,
+    done,
+    dropped,
+  ];
+
+  /// The states that end a thread.
+  static const closed = {done, dropped};
+
+  /// One cockpit symbol per state.
+  static const symbols = {
+    inProgress: '▶',
+    waiting: '⏳',
+    paused: '⏸',
+    planned: '❓',
+    backlog: '○',
+    done: '✅',
+    dropped: '✖',
+  };
+
+  static bool isValid(String value) => all.contains(value);
+
+  static bool isClosed(String value) => closed.contains(value);
+}
+
+/// A thread: a concrete matter with a state (`inProgress`, `waiting`, …)
+/// that will be done one day. Entries belong to it via [ThreadEntry]; its
+/// state history is the [ThreadState] rows. Written only by
+/// `thread_update` (and `remember`/`supersede`/`forget` for attachments).
+///
+/// `@Sync()`: a durable, user-visible record that must replicate
+/// (how-to-use-objectbox.md §8). See the "Threads (0.5.0)" section comment
+/// above for the cross-device caveats.
+@Entity()
+@Sync()
+class Thread {
+  @Id()
+  int id = 0;
+
+  /// Display title, 1..200 characters, no leading/trailing whitespace, no
+  /// control characters (enforced by the write path). Renamable.
+  String title;
+
+  /// [ScopeKey.of] of [title] – lookup key for "the thread with this
+  /// title". NOT unique: the write path keeps at most one LIVE thread per
+  /// ([project], [titleKey]) (contract §3, see the section comment).
+  @Index()
+  String titleKey;
+
+  /// Exact project name – same rule as [MemoryEntry.project].
+  @Index()
+  String project;
+
+  /// Denormalized current state: the state of the newest
+  /// [ThreadState] row by (recordedAt, id) that is not [ThreadState.asHistory].
+  /// Recomputed from the rows on every `thread_update`; `thread_get`
+  /// re-derives it and reports a mismatch (contract §8).
+  @Index()
+  String state;
+
+  /// When the current state became true; null = unknown (never defaulted
+  /// to now).
+  @Property(type: PropertyType.dateUtc)
+  DateTime? stateEventAt;
+
+  /// When the current state was recorded.
+  @Property(type: PropertyType.dateUtc)
+  DateTime stateRecordedAt;
+
+  /// Until when a `paused` thread is paused (informational – the server
+  /// never changes a state on its own).
+  @Property(type: PropertyType.dateUtc)
+  DateTime? pausedUntil;
+
+  /// Optimistic version: +1 on every call that writes a state row (or
+  /// fills in an unknown date), renames, moves, or changes [pausedUntil].
+  /// Attachments do not change it. Per device – see the section comment.
+  int version;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime createdAt;
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime updatedAt;
+
+  Thread({
+    this.id = 0,
+    required this.title,
+    required this.titleKey,
+    required this.project,
+    required this.state,
+    this.stateEventAt,
+    required this.stateRecordedAt,
+    this.pausedUntil,
+    this.version = 1,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc(),
+       updatedAt = updatedAt ?? createdAt ?? DateTime.now().toUtc();
+
+  /// True while the thread is not [ThreadStates.closed].
+  bool get isLive => !ThreadStates.isClosed(state);
+}
+
+/// One asserted state of a [Thread] – history, never edited except for
+/// filling in an unknown [eventAt] of the current row (`thread_update`
+/// action `dated`).
+///
+/// `@Sync()`: the history replicates with its thread.
+@Entity()
+@Sync()
+class ThreadState {
+  @Id()
+  int id = 0;
+
+  /// The thread (contract §4: ToOne for ownership; indexed automatically).
+  final thread = ToOne<Thread>();
+
+  /// One of [ThreadStates.all].
+  String state;
+
+  /// When the state became true; null = unknown (never defaulted to now).
+  @Property(type: PropertyType.dateUtc)
+  DateTime? eventAt;
+
+  /// When this row was written (always set).
+  @Property(type: PropertyType.dateUtc)
+  DateTime recordedAt;
+
+  /// The pause date asserted together with this state (audit copy).
+  @Property(type: PropertyType.dateUtc)
+  DateTime? pausedUntil;
+
+  /// '' by default; cap `_sourceRefMaxLen` (write path).
+  String sourceRef;
+
+  /// Set once at write time, never changed: true for late information
+  /// dated before the current state – stored as history only, never the
+  /// current row.
+  bool asHistory;
+
+  ThreadState({
+    this.id = 0,
+    required this.state,
+    this.eventAt,
+    required this.recordedAt,
+    this.pausedUntil,
+    this.sourceRef = '',
+    this.asHistory = false,
+  });
+}
+
+/// Thread ↔ entry membership – a link entity (contract §4) because the
+/// edge carries metadata ([attachedAt], [via]) and both directions are
+/// single indexed queries ("entries of thread T", "threads of entry E").
+///
+/// `@Sync()`: membership replicates with the thread and the entry.
+@Entity()
+@Sync()
+class ThreadEntry {
+  @Id()
+  int id = 0;
+
+  final thread = ToOne<Thread>();
+  final entry = ToOne<MemoryEntry>();
+
+  @Property(type: PropertyType.dateUtc)
+  DateTime attachedAt;
+
+  /// How it was attached: [ThreadVia.all].
+  String via;
+
+  ThreadEntry({this.id = 0, DateTime? attachedAt, required this.via})
+    : attachedAt = attachedAt ?? DateTime.now().toUtc();
+}
+
+/// Values of [ThreadEntry.via].
+abstract final class ThreadVia {
+  /// The status report `thread_update` stored from its `note`.
+  static const note = 'note';
+
+  /// `thread_update` `attachEntryIds`.
+  static const attach = 'attach';
+
+  /// `remember(threadId)`.
+  static const remember = 'remember';
+
+  /// Carried from the replaced entry by `supersede`.
+  static const supersede = 'supersede';
+
+  static const all = [note, attach, remember, supersede];
+}
+
+/// Idempotency record of one `thread_update` call with an
+/// `idempotencyKey`: a retry with the same key and the same arguments
+/// returns [resultJson] instead of writing again.
+///
+/// LOCAL-ONLY, deliberately not `@Sync()`: a per-device retry trace
+/// (how-to-use-objectbox.md §8 "per-device traces"), which also allows a
+/// fail-on-conflict unique key (same as [MemoryIndex.sourceKey]). Rows
+/// older than 30 days are pruned by `thread_update`.
+@Entity()
+class ThreadOp {
+  @Id()
+  int id = 0;
+
+  /// The caller's idempotency key. Value-indexed, not hash – see "Unique
+  /// value index" above.
+  @Unique()
+  @Index(type: IndexType.value)
+  String key;
+
+  /// Plain (device-local) id of the thread – never a relation across the
+  /// sync boundary (contract §7, [MemoryIndex.entryId] pattern).
+  int threadId;
+
+  /// The thread's version after the call.
+  int version;
+
+  /// sha256 of the canonicalized call arguments (minus the key): the same
+  /// key with different arguments is rejected, not replayed.
+  String argsHash;
+
+  /// The result map returned to the caller – archival only, never queried
+  /// (contract §2 allows JSON there).
+  String resultJson;
+
+  @Index()
+  @Property(type: PropertyType.dateUtc)
+  DateTime createdAt;
+
+  ThreadOp({
+    this.id = 0,
+    required this.key,
+    required this.threadId,
+    required this.version,
+    required this.argsHash,
+    required this.resultJson,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now().toUtc();
 }

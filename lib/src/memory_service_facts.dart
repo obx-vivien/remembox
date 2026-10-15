@@ -251,11 +251,20 @@ extension MemoryServiceFacts on MemoryService {
         // before _ensureProjectScope (which would register it). No-op in
         // open mode.
         _requireWritableProject(validatedProject, tool: 'fact_set');
+        // 0.5.0: the attribute value register – the single check
+        // (memory_service_attributes.dart). Before anything is written; a
+        // no-op while no attribute is registered.
+        final attributeWarnings = _checkAttributeValue(
+          attribute,
+          valueType,
+          valueText,
+          tool: 'fact_set',
+        );
         final ensured = _ensureProjectScope(
           validatedProject,
           reason: 'fact_set',
         );
-        final warnings = <String>[...ensured.warnings];
+        final warnings = <String>[...ensured.warnings, ...attributeWarnings];
         final dupeProjects = _nearDuplicateProjects(validatedProject);
         if (dupeProjects.isNotEmpty) {
           warnings.add(

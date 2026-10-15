@@ -14,8 +14,9 @@
 #   0. Layout + spawn environment – the zip unpacks to remembox/dist/ with
 #      executable launcher and binary, skill/SKILL.md, the setup templates
 #      (templates/cockpit.md, instructions-for-claude.md,
-#      global-CLAUDE.md – only for the zip under test; the previous
-#      release predates them) and README.md, and
+#      global-CLAUDE.md) and the executable Claude Code hook script
+#      hooks/cockpit-sync-hook.sh – only for the zip under test; the
+#      previous release predates them – and README.md, and
 #      tool/smoke.sh passes on the UNPACKED launcher (foreign cwd,
 #      unlimited fd limit).
 #   A. Fresh install – empty store directory: `tools/list` equals the tools
@@ -24,17 +25,43 @@
 #      missing project rejected), `recall`, `area_set` / `project_set`
 #      (unknown area rejected), `recall` by area, `fact_set` history,
 #      `fact_get` current vs `at`, `fact_query` (area, includeHistory, no
-#      filter rejected), `tags_list`, and consistent `stats` after a
-#      restart.
-#   B. Upgrade – only with <previous-release.zip>: the PREVIOUS release
-#      creates a store and writes entries with legacy tag spellings; the
-#      new release opens the same directory (entry count and vector index
-#      intact, `recall` finds the old entries, `reindex` registers the
-#      projects, `tags_normalize` dry run and real run, a new tag and a
-#      fact can be written, consistent `stats`). Then the previous release
-#      is started on the upgraded store again and must refuse it with the
-#      documented ObjectBox message ("DB's last entity ID … is higher than
-#      … from model"), and the new release must still open it afterwards.
+#      filter rejected), `remember` with kind `deadEnd` and `list_recent`
+#      by kind, a `partOf` link shown as `hasPart` by `get`, `tags_list`,
+#      consistent `stats` after a restart, and the thread tools:
+#      `thread_update` with a dated state and with a note (real embedding,
+#      found by `recall`), `thread_get` history and entries, `thread_list`,
+#      a stale `expectedVersion` rejected as `version_conflict`, an
+#      `idempotencyKey` replay, and `stats.threads`; then the shipped
+#      launcher's `cockpit-sync --parse-only` on the shipped template and
+#      one `cockpit-sync` run against the closed scenario store; finally
+#      the shipped hook script: unconfigured (no OBX_MEMORY_COCKPIT_FILE)
+#      it exits 0 silently and logs nothing; configured, with
+#      REMEMBOX_BIN unset, it finds ../dist/remembox by itself and renders
+#      the scenario's thread into a cockpit copy.
+#   B. Upgrade – only with <previous-release.zip> (0.4.0 or later: it
+#      needs `tag_define`): the PREVIOUS release creates a store, writes
+#      entries with legacy tag spellings, registers the marker tags
+#      status, learning (alias takeaway) and deadEnd, stores an episode
+#      tagged deadEnd, a fact tagged status and a decision tagged learning,
+#      and links two of them as `child`. The new release opens the same
+#      directory (entry count and vector index intact, `recall` finds the
+#      old entries, `reindex` registers the projects, `tags_normalize` dry
+#      run and real run, a new tag and a fact can be written). Then, in
+#      strict registry mode: `tags_list` reports deadEnd under
+#      kindCollisions; `tag_retire` retires status and learning (with
+#      takeaway); `remember` with takeaway is rejected with the hint and
+#      writes nothing; `kind_migrate` dry run and real run (converted,
+#      review, legacyLinks); `tag_remove` keeps the retirement; `recall`
+#      with kind deadEnd finds the migrated episode; a `child` link is
+#      rejected with the partOf hint; `attribute_define` state, then a
+#      `fact_set` outside it is rejected; `reindex` re-embeds nothing;
+#      `thread_update` creates a thread on the upgraded store; consistent
+#      `stats`. Then the previous release is started on the
+#      upgraded store again and must refuse it with the documented
+#      ObjectBox message ("DB's last entity ID … is higher than … from
+#      model" – the first number being this release's last entity id, 18
+#      for 0.5.0, the second the previous model's, 11 for 0.4.0), and the
+#      new release must still open it afterwards.
 #      Without <previous-release.zip> B is SKIPPED, loudly – the exit code
 #      stays 0, the summary says so.
 #
@@ -73,9 +100,9 @@ set -euo pipefail
 # launcher path. Everything a user runs or reads after unzipping must be
 # there, and the two executables must have survived the zip as executables.
 # $3 is the layout to expect: `current` (the zip under test – everything the
-# release ships today, including templates/) or `previous` (an older
+# release ships today, including templates/ and hooks/) or `previous` (an older
 # published release used for the upgrade scenario – it predates
-# templates/, which were added after 0.3.1, so they are not required
+# templates/ (added after 0.3.1) and hooks/, so they are not required
 # there).
 unpack() {
   local zip="$1" name="$2" layout="$3" root
@@ -100,7 +127,7 @@ unpack() {
   # system-installed ObjectBox library.
   local required="remembox/dist/lib/libobjectbox.dylib remembox/skill/SKILL.md remembox/README.md remembox/LICENSE"
   if [ "$layout" = "current" ]; then
-    required="$required remembox/templates/cockpit.md"
+    required="$required remembox/templates/cockpit.md remembox/hooks/cockpit-sync-hook.sh"
     required="$required remembox/templates/instructions-for-claude.md remembox/templates/global-CLAUDE.md"
   fi
   for item in $required; do
@@ -109,6 +136,12 @@ unpack() {
       exit 1
     fi
   done
+  # The hook script is run directly by Claude Code's hooks, so it has to
+  # keep its executable bit through the zip.
+  if [ "$layout" = "current" ] && [ ! -x "$root/remembox/hooks/cockpit-sync-hook.sh" ]; then
+    echo "ERROR: $zip does not contain an executable remembox/hooks/cockpit-sync-hook.sh" >&2
+    exit 1
+  fi
   printf '%s\n' "$root/remembox/dist/remembox"
 }
 
@@ -193,7 +226,7 @@ trap finish EXIT
 
 echo "==> Release acceptance: $NEW_ZIP (expecting remembox $VERSION)"
 NEW_LAUNCHER="$(unpack "$NEW_ZIP" new current)" || exit 1
-echo "PASS: layout – $(basename "$NEW_ZIP") unpacks to remembox/{dist,skill,templates,README.md,LICENSE} with executable launcher and binary and the bundled dylib"
+echo "PASS: layout – $(basename "$NEW_ZIP") unpacks to remembox/{dist,hooks,skill,templates,README.md,LICENSE} with executable launcher, binary and hook script and the bundled dylib"
 
 DRIVER_ARGS=(
   --new-launcher "$NEW_LAUNCHER"

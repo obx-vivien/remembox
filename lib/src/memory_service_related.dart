@@ -67,7 +67,7 @@ extension MemoryServiceRelated on MemoryService {
   /// length) – everything that does not need the store, so a bad list is
   /// rejected before anything is embedded or written. Target existence is
   /// checked inside the write transaction by [_createLinkInTx].
-  void _requireLinkSpecs(List<LinkSpec> links) {
+  void _requireLinkSpecs(List<LinkSpec> links, {required String tool}) {
     if (links.length > MemoryService.maxLinksPerRemember) {
       throw ValidationException(
         'Too many links: ${links.length} exceeds the '
@@ -76,7 +76,7 @@ extension MemoryServiceRelated on MemoryService {
       );
     }
     for (final l in links) {
-      _requireLinkFields(l.type, l.note);
+      _requireLinkFields(l.type, l.note, tool: tool);
     }
   }
 

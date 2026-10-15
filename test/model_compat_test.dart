@@ -17,6 +17,14 @@
 /// 0.3.1.json`, copied before `TagDefinition` was generated) – every 0.3.1
 /// entity/property byte-identical, exactly two new entities
 /// (`TagDefinition`, `TagAlias`).
+///
+/// A third group covers 0.5.0: the current model against the frozen 0.4.0
+/// model (`test/fixtures/objectbox-model-0.4.0.json`, copied from main
+/// before `TagRetirement` was generated) – all eleven 0.4.0 entities
+/// byte-identical, exactly seven new entities (`TagRetirement`,
+/// `AttributeDefinition`, `AttributeValue`, and the thread entities
+/// `Thread`, `ThreadEntry`, `ThreadOp`, `ThreadState`). No new fixture for
+/// 0.5.0: fixtures freeze RELEASED models, and 0.5.0 is not released yet.
 library;
 
 import 'dart:convert';
@@ -103,6 +111,12 @@ void main() {
   // in that group still compare against the CURRENT model.
   final model031 = _loadModel('test/fixtures/objectbox-model-0.3.1.json');
   final entities031 = _entities(model031);
+  // The 0.4.0 model, frozen before TagRetirement was added (0.5.0). Same
+  // pattern as above: the 0.3.1 group's counter and added-entity tests
+  // describe the 0.3.1 -> 0.4.0 step, so they compare against this fixture;
+  // its entity/property tests still compare against the CURRENT model.
+  final model040 = _loadModel('test/fixtures/objectbox-model-0.4.0.json');
+  final entities040 = _entities(model040);
 
   group('model_compat (0.2.0 -> 0.3.0, areas and facts)', () {
     test('every 0.2.0 entity is present with identical id/name/flags/'
@@ -338,12 +352,12 @@ void main() {
     test('exactly two new entities, TagDefinition at id 10 and TagAlias '
         'at id 11', () {
       final oldIds = entities031.map((e) => e['id'] as String).toSet();
-      final added = newEntities
+      final added = entities040
           .where((e) => !oldIds.contains(e['id']))
           .toList();
       expect(added.map((e) => e['name']), ['TagDefinition', 'TagAlias']);
       expect(added.map((e) => _numericId(e['id'] as String)), [10, 11]);
-      expect(newEntities.length, entities031.length + 2);
+      expect(entities040.length, entities031.length + 2);
       for (final entity in added) {
         expect(
           _relations(entity),
@@ -355,15 +369,114 @@ void main() {
 
     test('counters: lastEntityId 11, lastRelationId and modelVersion '
         'unchanged, lastIndexId grew by three, retired* still empty', () {
-      expect(_numericId(newModel['lastEntityId'] as String), 11);
-      expect(newModel['lastRelationId'], model031['lastRelationId']);
-      expect(newModel['modelVersion'], model031['modelVersion']);
+      expect(_numericId(model040['lastEntityId'] as String), 11);
+      expect(model040['lastRelationId'], model031['lastRelationId']);
+      expect(model040['modelVersion'], model031['modelVersion']);
       expect(
-        _numericId(newModel['lastIndexId'] as String),
+        _numericId(model040['lastIndexId'] as String),
         _numericId(model031['lastIndexId'] as String) + 3,
         reason:
             'TagDefinition.name, TagAlias.name and TagAlias.tag are the '
             'only new indexes',
+      );
+      for (final key in [
+        'retiredEntityUids',
+        'retiredIndexUids',
+        'retiredPropertyUids',
+        'retiredRelationUids',
+      ]) {
+        expect(model040[key], isEmpty, reason: key);
+      }
+    });
+  });
+
+  group('model_compat (0.4.0 -> current, retired tags, attribute '
+      'values and threads)', () {
+    test('every 0.4.0 entity is byte-identical (fields, properties, '
+        'relations)', () {
+      expect(entities040, hasLength(11));
+      for (final old in entities040) {
+        final current = _entityById(newEntities, old['id'] as String);
+        // Whole-map equality: id, name, flags, lastPropertyId, every
+        // property (id, name, type, flags, indexId, relationTarget) and
+        // every relation – nothing on a shipped entity may change.
+        expect(current, old, reason: 'entity ${old['name']} changed');
+      }
+    });
+
+    test('exactly seven new entities: TagRetirement (12), '
+        'AttributeDefinition (13), AttributeValue (14) without a relation, '
+        'and the thread entities Thread (15), ThreadEntry (16), ThreadOp '
+        '(17), ThreadState (18) whose only ToOnes are ThreadState.thread, '
+        'ThreadEntry.thread and ThreadEntry.entry', () {
+      final oldIds = entities040.map((e) => e['id'] as String).toSet();
+      final added = newEntities
+          .where((e) => !oldIds.contains(e['id']))
+          .toList();
+      expect(added.map((e) => e['name']), [
+        'TagRetirement',
+        'AttributeDefinition',
+        'AttributeValue',
+        'Thread',
+        'ThreadEntry',
+        'ThreadOp',
+        'ThreadState',
+      ]);
+      expect(
+        added.map((e) => _numericId(e['id'] as String)),
+        [12, 13, 14, 15, 16, 17, 18],
+      );
+      expect(newEntities.length, entities040.length + 7);
+      // Every new entity: no standalone (ToMany) relation – lastRelationId
+      // stays untouched.
+      for (final entity in added) {
+        expect(
+          _relations(entity),
+          isEmpty,
+          reason: '${entity['name']} must not add a ToMany relation',
+        );
+      }
+      final toOnes = <String, String>{
+        for (final entity in added)
+          for (final prop in _properties(entity))
+            if (prop['relationTarget'] != null)
+              '${entity['name']}.${prop['name']}':
+                  prop['relationTarget'] as String,
+      };
+      expect(toOnes, {
+        'ThreadEntry.threadId': 'Thread',
+        'ThreadEntry.entryId': 'MemoryEntry',
+        'ThreadState.threadId': 'Thread',
+      });
+    });
+
+    test('ThreadOp is local-only (no Sync flag), the other thread entities '
+        'are synced', () {
+      int flagsOf(String name) =>
+          (newEntities.singleWhere((e) => e['name'] == name)['flags']
+              as int?) ??
+          0;
+      // Entity flag 2 = SYNC_ENABLED (objectbox model JSON).
+      for (final name in ['Thread', 'ThreadEntry', 'ThreadState']) {
+        expect(flagsOf(name) & 2, 2, reason: '$name must be @Sync()');
+      }
+      expect(flagsOf('ThreadOp') & 2, 0, reason: 'ThreadOp is local-only');
+    });
+
+    test('counters: lastEntityId 18, lastRelationId and modelVersion '
+        'unchanged, lastIndexId grew by thirteen, retired* still empty', () {
+      expect(_numericId(newModel['lastEntityId'] as String), 18);
+      expect(newModel['lastRelationId'], model040['lastRelationId']);
+      expect(newModel['modelVersion'], model040['modelVersion']);
+      expect(
+        _numericId(newModel['lastIndexId'] as String),
+        _numericId(model040['lastIndexId'] as String) + 13,
+        reason:
+            'TagRetirement.name, TagRetirement.aliasOf, '
+            'AttributeDefinition.name, AttributeValue.key, '
+            'AttributeValue.attribute, Thread.titleKey/project/state, '
+            'ThreadEntry.thread/entry, ThreadOp.key/createdAt and '
+            'ThreadState.thread are the only new indexes',
       );
       for (final key in [
         'retiredEntityUids',

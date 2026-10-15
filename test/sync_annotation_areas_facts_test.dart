@@ -210,4 +210,49 @@ void main() {
       expect(store.box<TagAlias>().get(id)!.tag, 'housework');
     },
   );
+
+  // 0.5.0: the three new entities are @Sync() like every other domain
+  // entity – same pitfall, same fix.
+  final newEntityPuts = <String, void Function(Store)>{
+    'TagRetirement': (s) => s.box<TagRetirement>().put(
+      TagRetirement(name: 'chores', hint: 'Use the tag housework.'),
+    ),
+    'AttributeDefinition': (s) => s.box<AttributeDefinition>().put(
+      AttributeDefinition(name: 'state', description: 'Where it stands.'),
+    ),
+    'AttributeValue': (s) => s.box<AttributeValue>().put(
+      AttributeValue(
+        key: AttributeValue.keyFor('state', 'done'),
+        attribute: 'state',
+        value: 'done',
+      ),
+    ),
+  };
+  for (final entry in newEntityPuts.entries) {
+    test(
+      'KNOWN PITFALL: put() on ${entry.key} WITHOUT any sync client fails '
+      'with OBX 10001; a STARTED local-activation client makes it work',
+      () {
+        expect(
+          () => entry.value(store),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('sync-enabled type'), contains('10001')),
+            ),
+          ),
+        );
+
+        final client = SyncClient(
+          store,
+          [localActivationSyncUrl],
+          [SyncCredentials.none()],
+        )..start();
+        addTearDown(client.close);
+
+        entry.value(store);
+      },
+    );
+  }
 }

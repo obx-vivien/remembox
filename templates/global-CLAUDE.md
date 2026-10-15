@@ -14,9 +14,21 @@
   (template: `templates/cockpit.md`).
 - After a session with a notable result:
   1. Overwrite the topic's line in the cockpit – the cockpit is "now".
-  2. Add a dated status entry to RememBox (`kind: fact` + tag `status`),
-     append-only – RememBox is the history.
+  2. Set the thread's state with ONE `thread_update` call (`threadId`, or
+     `title` + `project`; `state` as in the cockpit legend, e.g.
+     `inProgress`, `waiting`, `done`; `eventAt` when the date is known;
+     the dated status report as `note`) – RememBox keeps every earlier
+     state as history. A report with tags: `remember` with
+     `kind: snapshot` and `threadId`.
   3. Store decisions additionally as their own entry with `kind: decision`.
+- Find a thread with `thread_list`, its history with `thread_get`.
+- The generated section of the cockpit (between
+  `<!-- remembox:threads:start -->` and `<!-- remembox:threads:end -->`)
+  is never edited by hand. After thread changes in Claude Code, run
+  `remembox cockpit-sync` (the launcher in RememBox's `dist/`; it needs
+  `OBX_MEMORY_COCKPIT_FILE` set to the cockpit's path, or `--cockpit`).
+  Optional: the hook script `hooks/cockpit-sync-hook.sh` from the release
+  ZIP runs it at session start and end (setup: RememBox's README).
 - Never create a second cockpit or status files next to it. If the
   cockpit file is not reachable, say so.
 - On a conflict: cockpit = current state, RememBox = history, skills =
@@ -28,16 +40,19 @@
   with the topic (optionally with a `project` filter) – and again mid-task
   whenever an earlier decision might matter ("have we decided this
   already?").
-- **Store without asking** with `remember`: decisions with their reasons
-  (`kind: decision`), preferences and working rules (`kind: preference`),
-  facts about projects, systems, people (`kind: fact`), episodes with a
-  lesson (`kind: episode`), pointers to outside resources
-  (`kind: reference`). These five are the only kinds – anything else is
-  rejected. A status snapshot is `kind: fact` + tag `status`.
+- **Store without asking** with `remember`, and say what an entry is with
+  its kind: decisions with their reasons (`decision`), preferences and
+  working rules (`preference`), facts about projects, systems, people
+  (`fact`), something that happened (`episode`), pointers to outside
+  resources (`reference`), a dated status report on a thread
+  (`snapshot`), what to apply next time (`lesson`), a dropped approach and
+  why (`deadEnd`). These eight are the only kinds – anything else is
+  rejected; a tag equal to a kind name is dropped.
 - **Dead ends matter most:** "approach X dropped because Y" as
-  `kind: episode` with tag `deadEnd`. Before a new attempt at a known
-  problem, `recall` the earlier attempts first, and never re-investigate
-  something stored as done or failed without citing that entry.
+  `kind: deadEnd`. Before a new attempt at a known problem, list the
+  earlier ones (`list_recent` with `kind: deadEnd` and the `project`, or
+  `recall`), and never re-investigate something stored as done or failed
+  without citing that entry.
 - **Always fill provenance:** `sourceType` (chat/file/url/note),
   `sourceRef` (session, file path or URL), `project`, `tags`.
 - **Never store** secrets, passwords, tokens or credentials, and nothing
@@ -86,8 +101,10 @@ tag are rejected, and the error names the closest registered names. See
 ## Tags
 
 - Cross-cutting labels that group ACROSS projects: people (`partner`,
-  `kid1`), recurring themes (`taxes`, `hiring`), work markers (`status`,
-  `todo`, `deadEnd`, `learning`).
+  `kid1`), recurring themes (`taxes`, `hiring`), and one work marker:
+  `todo`. Status reports, lessons and dead ends are kinds, not tags.
+- Ask before registering a new curated tag – the register is the user's
+  vocabulary.
 - camelCase, singular, 3–5 per entry. Reuse before inventing: `tags_list`
   first.
 - Never a project, area or kind name, and never an identifier or version
@@ -100,15 +117,21 @@ tag are rejected, and the error names the closest registered names. See
 
 After every `remember` or `supersede`, read the `related` list in the
 result (or run a quick `recall`): an older state of the same thing →
-`supersede`; something that belongs with it → `link` (`related`,
-`derivedFrom`, `contradicts`, `parent`/`child`), or pass `links` (`toId`,
-`type`, `note`) in the `remember` call itself. People, cases and objects
-that already have entries are always linked.
+`supersede`; something that belongs with it → `link`, or pass `links`
+(`toId`, `type`, `note`) in the `remember` call itself (the new entry is
+then A). For `link` from A to B: `derivedFrom` – A follows from B;
+`contradicts` – A contradicts B; `partOf` – A belongs to B (B shows it as
+`hasPart`); `related` – undirected. `parent`/`child` are legacy, use
+`partOf`. People, cases and objects that already have entries are always
+linked.
 
 ## Three kinds of "new state" – nothing is lost
 
-- **State that changes** (a rent, an address, a stage): `fact_set` – the
-  old value stays in the history with its dates.
+- **The state of a thread:** `thread_update` – one call per change; the
+  earlier states stay in the history with their dates.
+- **A value that changes** (a rent, an address): `fact_set` – the old
+  value stays in the history with its dates. An attribute registered with
+  allowed values (`attributes_list`) takes only those.
 - **Measurements** (KPIs): never replaced – each value its own point with
   date and period. Until RememBox supports facts per period (check the
   current docs), store them as prose with `remember`.
@@ -126,6 +149,7 @@ explains it with `explainedByEntryId`.
 
 ## Maintenance tools
 
-`project_merge`, `entries_move`, `tag_merge`, `tag_remove` and
-`tags_normalize` rewrite stored data – only when the user explicitly asks,
-and with `dryRun: true` first.
+`project_merge`, `entries_move`, `entries_update`, `kind_migrate`,
+`tag_merge`, `tag_remove` and `tags_normalize` rewrite stored data, and
+`tag_retire` and `attribute_define` change the register – only when the
+user explicitly asks, and with `dryRun: true` first where offered.

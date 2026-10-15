@@ -30,6 +30,13 @@
 /// plumbing and the same real-subprocess pattern; adds
 /// test/helpers/gated_fact_writer_worker.dart and
 /// test/helpers/fact_reader_worker.dart.
+///
+/// 0.5.0 threads: a third group runs concurrent `thread_update` calls on
+/// ONE thread title from four processes (test/helpers/
+/// gated_thread_writer_worker.dart, read back by test/helpers/
+/// thread_reader_worker.dart): the query-first "one live thread per title"
+/// rule and the version counter must hold across processes because each
+/// call is one store.lock-guarded lending.
 @Timeout(Duration(minutes: 3))
 library;
 
@@ -674,6 +681,168 @@ void main() {
                 'terminate at the current row ($currentId)',
           );
         }
+      },
+    );
+  });
+
+  group('thread_update gated multi-process acceptance (0.5.0 threads)', () {
+    late Directory tempDir;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync(
+        'remembox_acceptance_threads_',
+      );
+    });
+
+    tearDown(() {
+      tempDir.deleteSync(recursive: true);
+    });
+
+    Future<_WorkerRun> runThreadWorker(List<String> args, String workerId) async {
+      final proc = await Process.start(_dartExe, [
+        'run',
+        'test/helpers/gated_thread_writer_worker.dart',
+        ...args,
+      ]);
+      final stdoutLines = <String>[];
+      final stderrLines = <String>[];
+      final stdoutDone = proc.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .forEach(stdoutLines.add);
+      final stderrDone = proc.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .forEach(stderrLines.add);
+      final exitCode = await proc.exitCode;
+      await stdoutDone;
+      await stderrDone;
+      if (exitCode != 0 || !stdoutLines.join('\n').contains('DONE')) {
+        fail(
+          'thread worker $workerId exited $exitCode without DONE.\n'
+          'stdout: $stdoutLines\nstderr: '
+          '${stderrLines.where((l) => !_nativeNoise.hasMatch(l)).toList()}',
+        );
+      }
+      final ledgerPath = args[2];
+      final lines = await File(ledgerPath).readAsLines();
+      return _WorkerRun(
+        workerId: workerId,
+        exitCode: exitCode,
+        stdoutLines: stdoutLines,
+        stderrLines: stderrLines,
+        ledger: [
+          for (final line in lines)
+            if (line.trim().isNotEmpty) jsonDecode(line) as Map<String, Object?>,
+        ],
+      );
+    }
+
+    test(
+      '4 processes x 25 concurrent thread_update calls on ONE title, then a '
+      'replay -> exactly one thread, version and state rows equal the '
+      'number of created/updated calls, every call saw the same thread id, '
+      'and the replay returns the original result',
+      () async {
+        const n = 4, count = 25;
+        final runs = await Future.wait([
+          for (var i = 0; i < n; i++)
+            runThreadWorker([
+              tempDir.path,
+              '$count',
+              '${tempDir.path}.threadledger_$i.jsonl',
+              'w$i',
+            ], 'w$i'),
+        ]);
+        final ledger = [for (final r in runs) ...r.ledger];
+        expect(ledger, hasLength(n * count));
+        final writes = ledger
+            .where((e) => e['action'] == 'created' || e['action'] == 'updated')
+            .length;
+        expect(
+          ledger.where((e) => e['action'] == 'created'),
+          hasLength(1),
+          reason: 'exactly one call may create the shared thread',
+        );
+        expect(
+          ledger.every(
+            (e) => const ['created', 'updated', 'unchanged'].contains(
+              e['action'],
+            ),
+          ),
+          isTrue,
+          reason: 'no other outcome is possible for undated states',
+        );
+        final threadIds = ledger.map((e) => e['threadId']).toSet();
+        expect(threadIds, hasLength(1), reason: 'every call saw one thread');
+        // Every call's result reports the state it asked for: a write that
+        // waited for the lock must not lose to an earlier one and still say
+        // "updated" (its time is taken under store.lock).
+        for (final e in ledger) {
+          expect(
+            e['state'],
+            e['requested'],
+            reason: '${e['workerId']}#${e['seq']} (${e['action']}) reports '
+                '${e['state']} but asked for ${e['requested']}',
+          );
+        }
+        final writeVersions = [
+          for (final e in ledger)
+            if (e['action'] == 'created' || e['action'] == 'updated')
+              e['version'] as int,
+        ]..sort();
+        expect(
+          writeVersions,
+          [for (var v = 1; v <= writes; v++) v],
+          reason: 'each state write is exactly one version step',
+        );
+        final last = ledger.reduce(
+          (a, b) => (a['version'] as int) >= (b['version'] as int) ? a : b,
+        );
+
+        final original = runs[0].ledger.firstWhere((e) => e['seq'] == 3);
+        final replay = await runThreadWorker([
+          tempDir.path,
+          'replay',
+          '${tempDir.path}.threadledger_replay.jsonl',
+          'w0',
+          '3',
+        ], 'replay');
+        final replayed = replay.ledger.single;
+        expect(replayed['replayed'], isTrue);
+        expect(replayed['version'], original['version']);
+        expect(replayed['action'], original['action']);
+
+        final proc = await Process.run(_dartExe, [
+          'run',
+          'test/helpers/thread_reader_worker.dart',
+          tempDir.path,
+          'sharedthread',
+        ]);
+        expect(proc.exitCode, 0, reason: '${proc.stderr}');
+        Map<String, Object?>? read;
+        for (final line in proc.stdout.toString().split('\n')) {
+          final t = line.trim();
+          if (!t.startsWith('{')) continue;
+          try {
+            final decoded = jsonDecode(t) as Map<String, Object?>;
+            if (decoded.containsKey('threads')) read = decoded;
+          } on FormatException {
+            continue; // native log noise starting with '{'
+          }
+        }
+        expect(read, isNotNull, reason: 'reader printed no result line');
+        final threads = (read!['threads'] as List).cast<Map<String, Object?>>();
+        expect(threads, hasLength(1), reason: 'exactly one shared thread');
+        expect(threads.single['id'], threadIds.single);
+        expect(threads.single['version'], writes);
+        expect(
+          threads.single['state'],
+          last['state'],
+          reason: 'the stored state is the state of the highest version',
+        );
+        expect(threads.single['stateRows'], writes);
+        expect(read['totalThreads'], 1);
       },
     );
   });

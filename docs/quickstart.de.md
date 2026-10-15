@@ -184,7 +184,7 @@ jedes Mal geladen wird:
   wenn du beides nutzt, trag den Block also an beiden Stellen ein.
 
 ```text
-Gedächtnis (RememBox): Zu Beginn jeder Sitzung zuerst meine Cockpit-Datei (cockpit.md) lesen. Vor jeder nicht trivialen Aufgabe zuerst recall, Ergebnisse danach speichern. `project` ist Pflicht und hat feste Namen – z. B. family, private, cats, company1, company2, finances (durch die eigene Liste ersetzen). Projektnamen und Tags kommen aus einem Register: zuerst nachschlagen (areas_list, tags_list) und einen vorhandenen Namen nehmen; passt keiner, den neuen zuerst mit einem Satz Beschreibung anlegen (project_set bzw. tag_define), dann benutzen – nie Schreibvarianten erfinden. Exakte, veränderliche Werte (eine Miete, eine Adresse, eine Stufe) mit fact_set, alles andere mit remember. Tags: camelCase, 3–5 pro Eintrag; nie ein Projektname, Bereichsname oder eine Kennung. Nach jedem remember oder supersede den neuen Eintrag mit den zugehörigen Einträgen verknüpfen (das Ergebnis nennt Kandidaten unter related; link oder links bei remember). Wartungswerkzeuge (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) nur auf meine ausdrückliche Bitte.
+Gedächtnis (RememBox): Zu Beginn jeder Sitzung zuerst meine Cockpit-Datei (cockpit.md) lesen. Vor jeder nicht trivialen Aufgabe zuerst recall, Ergebnisse danach speichern. `project` ist Pflicht und hat feste Namen – z. B. family, private, cats, company1, company2, finances (durch die eigene Liste ersetzen). Projektnamen und Tags kommen aus einem Register: zuerst nachschlagen (areas_list, tags_list) und einen vorhandenen Namen nehmen; passt keiner, den neuen zuerst mit einem Satz Beschreibung anlegen (project_set bzw. tag_define), dann benutzen – nie Schreibvarianten erfinden. Was ein Eintrag ist, sagt seine Art (kind: decision, lesson, deadEnd, snapshot, …), kein Tag. Ein Statuswechsel ist EIN Aufruf: thread_update (state, eventAt wenn bekannt, optional note); exakte, veränderliche Werte (eine Miete, eine Adresse) mit fact_set, alles andere mit remember. Tags: camelCase, 3–5 pro Eintrag; nie ein Projektname, Bereichsname oder eine Kennung. Nach jedem remember oder supersede den neuen Eintrag mit den zugehörigen Einträgen verknüpfen (das Ergebnis nennt Kandidaten unter related; link oder links bei remember; partOf = A gehört zu B). Wartungswerkzeuge (project_merge, entries_move, entries_update, kind_migrate, tag_merge, tag_remove, tag_retire, tags_normalize, attribute_define) nur auf meine ausdrückliche Bitte.
 ```
 
 Ersetze die Projektliste (`family, private, …`) durch deine eigene –
@@ -207,6 +207,12 @@ Beispiel-Cockpit zum Anpassen). Lege dein Cockpit an einem festen Ort
 ab und ersetze `cockpit.md` im Block durch seinen vollständigen Pfad.
 Programme mit Zugriff auf lokale Dateien (Claude Code, Cowork) lesen es
 dann zu Beginn jeder Sitzung; die Web- und Mobil-Apps können das nicht.
+
+Wer Claude Code nutzt und ein Cockpit führt, kann dessen erzeugten
+Fäden-Abschnitt zusätzlich per Hook-Skript automatisch aktualisieren
+lassen: Es liegt als `hooks/cockpit-sync-hook.sh` im selben
+`remembox`-Ordner, den Eintrag für die `settings.json` zeigt die
+[README](../README.md) (auf Englisch). Das ist optional.
 
 ## Schritt 6: Funktionstest 🎉
 

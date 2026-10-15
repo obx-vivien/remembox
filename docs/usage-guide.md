@@ -141,8 +141,9 @@ The rules teach the assistant to use memory as part of normal work.
 
 - store durable conclusions in RememBox
 - record decisions as `decision` entries with the reasoning
-- record meaningful dead ends as `episode` entries
-- add a dated status snapshot as a `fact` tagged `status` when useful
+- record meaningful dead ends as `deadEnd` entries, takeaways as `lesson`
+- set the thread's state with one `thread_update` call (with the dated
+  status report as its `note` when useful)
 - supersede outdated memories rather than silently contradicting them
 - link related memories when one explains, derives from or contradicts another
 - update the cockpit if the current operational state or next action changed
@@ -240,8 +241,8 @@ the upgrade.
 
 ### Tags
 
-Tags are cross-project labels – people, recurring topics, markers like
-`status`/`lesson`/`todo` – not a second copy of `project` or `kind`, which
+Tags are cross-project labels – people, recurring topics, a marker like
+`todo` – not a second copy of `project` or `kind`, which
 are already filterable, and not an identifier or version number, which
 belongs in the text. The server enforces this on every `remember`/
 `supersede` call: tags are normalized to camelCase (`apps-script` becomes
@@ -258,13 +259,13 @@ spelling variants of each other) and `unused` (tags with zero live
 entries) – reuse what already exists instead of adding a near-duplicate.
 
 **Register a genuinely new tag with `tag_define`** – a name and one
-sentence on what the tag marks, e.g. `tag_define(name: "lesson",
-description: "Something we learned the hard way.")`. The name is
+sentence on what the tag marks, e.g. `tag_define(name: "insight",
+description: "Something we noticed that is worth keeping.")`. The name is
 normalized like any tag (`apps-script` registers `appsScript`). A name
 that repeats a project (active or archived – a project merged away with
 `project_merge` no longer counts), a kind or an area is rejected, and so
 is one that differs from a registered tag only by case, plural or
-separators (`lessons` next to `lesson`) unless you pass
+separators (`insights` next to `insight`) unless you pass
 `allowSimilar: true`. In the
 default open mode registering is optional, but it documents the
 vocabulary; in strict mode (below) only registered tags can be used.
@@ -310,6 +311,268 @@ and removes the `from` registrations (the result says what happened in
 `intoDefinition` and `definitionsRemoved`), and `tag_remove` removes the
 registration together with the tag.
 
+### Kinds instead of marker tags (0.5.0)
+
+Every entry has a `kind`. Since 0.5.0 there are eight: `fact`, `decision`,
+`preference`, `episode`, `reference`, and three that used to be marker
+tags – `snapshot` (a dated status report on a thread), `lesson` (what to
+apply next time) and `deadEnd` (a dropped approach and why). A kind is a
+filter, a tag is not: `list_recent` with `kind: "deadEnd"` (and a
+`project` or `area`) lists every dead end, newest first – check it before
+a new attempt at a known problem. `recall` takes `kind` too, but applies it
+after the nearest-neighbor search, so it can return fewer hits than asked
+for. A tag equal to a kind name (`lesson`, `deadEnd`, `snapshot`) is
+dropped on write with a warning, and `tags_list` reports old tags, registered
+tags and aliases with such a name as `kindCollisions`.
+
+### Threads
+
+A thread is a concrete matter with a state that will be done one day – a
+website relaunch, an offer to a client, a contract renewal. Its state is
+one of `backlog`, `planned`, `inProgress`, `waiting`, `paused`, `done`,
+`dropped` (`done` and `dropped` end it); entries belong to it. A status
+change is ONE call:
+
+```text
+thread_update(title: "Website relaunch", project: "company1", state: "inProgress")
+  → {threadId: 12, action: "created", version: 1, since: null, …}
+thread_update(threadId: 12, state: "waiting", eventAt: "2026-10-07",
+  note: "Staging is online; waiting for the copy texts from client3.")
+  → {action: "updated", version: 2, since: "2026-10-07T00:00:00.000Z",
+     note: {id: 612, indexed: true}, attached: [612], …}
+```
+
+- **`title` + `project`** create the thread – or update the live thread
+  with that title in that project (case and spaces do not matter); with
+  **`threadId`**, `title` renames and `project` moves it. Two live threads
+  with one title in one project are not allowed; a closed one with the
+  same title is reported (`pass threadId to reopen it`).
+- **`eventAt`** is when the state became true – pass it only when you
+  know it (a plain date is fine; a date after today is rejected). Without
+  it the date is stored as unknown, never as "now"; `since` is then
+  `null` and `sinceRecordedAt` says when it was recorded.
+- **Late information:** a state dated before the latest known state date
+  of the thread is stored as history only (`action: historyAdded`, a
+  warning; a `pausedUntil` given with it stays on that history row) – the
+  current state does not change. An unknown date of the current state can
+  be filled in once (`action: dated`); a known date is never corrected.
+  A plain date counts by calendar day everywhere – a date and a timestamp
+  of the same local day are the same day. `eventAt` needs `state`.
+- **`note`** stores a dated status report as an entry of kind `snapshot`
+  in the thread's project and attaches it; `attachEntryIds` attaches
+  existing entries; `remember` and `supersede` take `threadId`, and a
+  `supersede` carries the old entry's threads to the new one.
+  `pausedUntil` goes with `paused` (cleared when the thread leaves
+  `paused`; `thread_list` flags an elapsed pause, the server never changes
+  a state on its own).
+- **`version`** changes with every state row, rename, move or pause date
+  (not with attachments). Pass the version you read as `expectedVersion`:
+  if someone changed the thread in between, the call fails with
+  `error: "version_conflict"` and the thread as it stands (`current`) –
+  nothing is written. An **`idempotencyKey`** makes a retry safe: the same
+  key with the same arguments returns the first result (`replayed: true`)
+  for 30 days; with other arguments it is rejected – and `"2026-10-07"`
+  and `"2026-10-07T00:00:00Z"` count as different arguments.
+- **Reading:** `thread_list` (filters `project`, `area`, `states`,
+  `includeClosed`) and `thread_get` (by `threadId`, or `title` +
+  `project`) – the full history with `current` marking the current row,
+  and the attached entries.
+
+`version` is a check on one device: with Sync, the last write wins across
+devices, as for every other synced row – and two devices can create the
+same title independently (then a call by title is rejected with both ids;
+pass `threadId`).
+
+#### The cockpit section
+
+`remembox cockpit-sync` (a command of the launcher, not an MCP tool) writes
+the live threads into the cockpit file between two marker lines and
+compares the hand-written lines with the threads:
+
+```text
+<!-- remembox:threads:start -->
+_Generated by `remembox cockpit-sync` 2026-10-14 09:00 – do not edit between the markers; change a state with thread_update._
+
+### company1
+- ▶ **Website relaunch** – since 2026-10-07 · thread 12 · 3 entries
+- ⏸ **Studio rent renewal** – until 2026-11-10 · thread 14
+<!-- remembox:threads:end -->
+```
+
+- Each line shows the thread id as `thread 12`, not `#12`: in the cockpit
+  `#123` always means a memory entry, so a bare `#12` would send an
+  assistant to `get(12)` on the wrong record. Use `thread_get` with that id.
+- The file comes from `--cockpit <path>` or `OBX_MEMORY_COCKPIT_FILE` –
+  one of the two is required (relative paths count from the directory the
+  launcher was started in). The file is read as LF text; CRLF files are
+  not supported. Without the markers the section is appended at the end – move the
+  marker pair once to where it belongs; later runs replace it in place.
+  Any other marker shape (one missing, twice, reversed) is refused
+  (exit 4). The file is rewritten in place (its mode stays) only when the
+  section changed, after a backup of the previous content
+  (`cockpit.bak` next to the compare log – never next to the cockpit),
+  and only if nobody changed it while the command ran (exit 3 otherwise –
+  run it again). If the live threads cannot all be read (more than 2000),
+  nothing is written (exit 1, logged with `truncated`).
+- The comparison (`mismatches`, `noThread`, `noLine`, `ambiguous`, matched
+  by title) is appended as one JSON line to the compare log
+  (`OBX_MEMORY_COCKPIT_LOG`, default
+  `~/Library/Logs/remembox/cockpit-compare.log`) – only when it changed
+  since the last line; over 1 MB it is rotated to `.1`. Hand lines are
+  `**▶ Title** – …`, `▶ **Title** …` or `▶ Title – …`; `·` detail lines,
+  `⚠` lines, numbered lines, tables, struck-through lines and archive
+  lines are skipped. A line's title is a short key, not the whole
+  sentence: the bold text up to its first ` – `, ` — `, ` · ` or `. `,
+  without a trailing full stop, at most 80 characters; a bold label
+  ending with `:` counts alone when it has more than three words,
+  otherwise together with the text after it.
+- `--dry-run` writes nothing (not even to the compare log);
+  `--parse-only` prints the parsed hand lines as JSON and does not touch
+  the store.
+- It opens the store like a gated server – behind `store.lock`, one short
+  read – so it is a second sanctioned opener next to the MCP servers. Next
+  to a persistent-mode process (`--serve` or `OBX_MEMORY_SYNC_URL`, which
+  holds `store.lock`) it exits with 1 after the 8-second startup probe and
+  logs that.
+- Run it after thread changes in Claude Code. Desktop and web sessions
+  only call `thread_update`; the next run renders.
+
+**The hook script.** `hooks/cockpit-sync-hook.sh` in the release ZIP
+(`<unzip dir>/remembox/hooks/cockpit-sync-hook.sh`; `tool/hooks/cockpit-sync-hook.sh`
+in a checkout) runs the command from Claude Code's `SessionStart` and `Stop`
+hooks. It is quiet and fail-open: it always exits 0 and prints nothing;
+a failure (launcher missing, non-zero exit, a run longer than
+`REMEMBOX_COCKPIT_HOOK_TIMEOUT`, default 20 seconds) becomes one JSON line
+in the compare log, and without `OBX_MEMORY_COCKPIT_FILE` it does nothing
+at all. It finds the launcher itself: `REMEMBOX_BIN` if set, else
+`../dist/remembox` relative to the script (the ZIP layout, `hooks/` next
+to `dist/`), else `../../dist/remembox` (the repository layout) – so the
+hook command only needs the script's path (a symlink to the script works; a
+copy somewhere else does not find `dist/` and needs `REMEMBOX_BIN`). Nothing installs it; add it
+to Claude Code's `settings.json` (`~/.claude/settings.json`) and replace the
+two placeholder paths (quote the script path if it contains spaces):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OBX_MEMORY_COCKPIT_FILE=\"$HOME/path/to/cockpit.md\" /path/to/remembox/hooks/cockpit-sync-hook.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OBX_MEMORY_COCKPIT_FILE=\"$HOME/path/to/cockpit.md\" /path/to/remembox/hooks/cockpit-sync-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The compare log defaults to `~/Library/Logs/remembox/cockpit-compare.log`
+on macOS and to `${XDG_STATE_HOME:-~/.local/state}/remembox/cockpit-compare.log`
+elsewhere – the hook and the command use the same rule.
+
+### Retired tags
+
+A tag that must no longer be written – a marker that became a kind, a
+label you replaced – is retired with `tag_retire` and a one-sentence
+`hint` saying what to do instead:
+
+```text
+tag_retire(name: "status", hint: "use thread_update for the state and kind snapshot for the report")
+tag_retire(name: "learning", hint: "use kind lesson", aliases: ["lessonLearned"])
+```
+
+The tag's aliases are retired with it, plus the extra names in `aliases`.
+In strict mode a write naming a retired tag (or one of those names) is
+rejected with the hint and nothing is written; in open mode it is stored
+with a warning. A retirement changes no entry – the entries that carry the
+tag keep it until you migrate them (below); the result counts them in
+`inUse`. `tag_define` and `tag_merge` refuse a retired name, `tag_remove`
+never lifts a retirement, and `tag_retire(name, remove: true)` does.
+`tags_list` lists them as `retiredTags`.
+
+### Attribute values
+
+`attribute_define` registers a fact attribute with a one-sentence
+description and, optionally, its allowed values:
+
+```text
+attribute_define(attribute: "stage", description: "Where a sales lead stands.",
+  values: ["contacted", "offerSent", "won", "lost"])
+```
+
+From then on `fact_set` checks every new value of `stage`: it must be one of
+those, exactly (case-sensitive), as `valueText`. Strict mode rejects
+anything else – `"offer sent"` gets "Did you mean "offerSent"?" – and also
+an attribute that differs from a registered one only by case, spaces, `-`
+or `_` (`Stage`); open mode stores it with a warning. (The state of a
+thread is not a fact – it has its own fixed set, see "Threads" above.) An attribute without
+values is only described, not restricted. `values` replaces the set (order
+= display order), `addValues`/`removeValues` change single ones, `remove:
+true` deletes the definition. Existing facts are never changed: the result
+counts the current facts that do not fit (`nonConformingCurrent`, with
+examples) – fix them with `fact_set`. `attributes_list` shows every
+registered attribute with its values and how many current facts hold each.
+
+### In-place edits and migrations
+
+Kind and tags of a stored entry can be changed without a new entry:
+
+- **`entries_update`** – selected ids: a new `kind`, `addTags`,
+  `removeTags`. Added tags follow the same rules as on `remember`; removing
+  is always allowed, also for a retired or unregistered tag.
+- **`kind_migrate`** – marker tags to kinds in one pass, by rules in
+  precedence order:
+
+  ```text
+  kind_migrate(dryRun: true, rules: [
+    {tags: ["deadEnd"], kind: "deadEnd"},
+    {tags: ["learning", "takeaway"], kind: "lesson"},
+    {tags: ["status"], kind: "snapshot"},
+    {tags: ["rule"], list: true}
+  ])
+  ```
+
+  By default only `fact` and `episode` entries convert (`fromKinds`,
+  per rule `convertFrom`/`dropFrom`); an entry of another kind lands in
+  `review` unchanged, with a suggested kind and the reason. A rule without
+  `kind` only removes its marker; `list: true` lists its entries, and
+  `keep: true` (only with `list: true` and no `kind`) leaves the marker on
+  them – to look at a list before deciding. `legacyLinks` lists every
+  `parent`/`child` link. `byRule` counts per rule what was applied:
+  `matched`, `converted` (the rule set the kind), `markerRemoved` (its
+  marker removed without it setting the kind), `overridden` (its convert
+  lost to an earlier rule – part of `markerRemoved`), `kept` and `review`
+  (entries carrying its marker that were left for review). Run the dry
+  run, read `review`, `notFound` and `legacyLinks`, then the real run.
+
+Both change only the kind and the tags: text, title, project, links and
+history stay, and the search index needs no update (`reindex` reports
+`reembedded: 0`). A tag left without entries is listed in `tagsNowUnused`
+for `tag_remove`. Both are maintenance tools – only when the user asks,
+`dryRun: true` first.
+
+There is no tool to retype a link: `unlink` it and `link` again with the
+new type. A continuation of an existing entry is a `supersede` – if the
+successor already exists, `supersede` the old entry with text identical to
+the successor's: it is recognized as a duplicate and the old entry is
+linked to it (note: this replaces an earlier `supersededBy` of the old
+entry).
+
 ### Strict registry mode
 
 By default (open mode) the register is advisory: a new project name is
@@ -319,8 +582,9 @@ That is what lets a session invent `acme_app` next to `acme-app`. With
 `OBX_MEMORY_REGISTRY_MODE=strict` the server enforces the register
 instead:
 
-- `remember`, `supersede`, `fact_set` and `entries_move` reject a project
-  that has no registry row, or that was merged into another one
+- `remember`, `supersede`, `fact_set`, `thread_update` and `entries_move`
+  reject a project that has no registry row, or that was merged into
+  another one
   (`project_merge`). Archived projects stay writable. The error names
   registered projects with a similar spelling and the `project_set` call
   that would register the name.
@@ -340,6 +604,13 @@ instead:
   to. Projects have no separate alias field – a merged project name
   already acts as one: the rejection names the project it was merged
   into (following the merge chain to the current one).
+- A retired tag (`tag_retire`) – or an alias of one – is rejected with its
+  hint, in the same message as any unregistered tag.
+- `link` and `remember`'s `links` reject the legacy types `parent` and
+  `child` (direction undefined) – use `partOf`.
+- `fact_set` rejects a value that is not allowed for a registered
+  attribute (`attribute_define`), a non-text value for it, and an
+  attribute that differs from a registered one only by case/space/-/_.
 
 Nothing is written when a call is rejected, and the server logs one
 `[registry] strict: rejected …` line per rejection. `areas_list`
@@ -373,14 +644,49 @@ active mode under `registry.mode`.
       (Merging into an unregistered target records no aliases and
       warns.) Synonyms that never were a tag go in with `tag_define`'s
       `addAliases`.
-   3. `tag_remove` the tags you drop. A tag that repeats a project, area
-      or kind name cannot be registered – `tag_merge` it into a real tag
-      or remove it.
-   4. `tags_list` with `limit: 500` again: expect `unregisteredInUse: 0`
-      (tags strict mode would reject) and `aliasesInUse: 0` (alias names
-      entries still carry – they resolve on write, but `tag_merge` them
-      into their tag to clean up).
-6. Set `OBX_MEMORY_REGISTRY_MODE=strict` in **every** client
+   3. Remove nothing yet – `tag_remove` comes last (step 7), after the
+      retirements.
+6. Move the old marker tags to kinds, in this order (dry runs first; the
+   order matters):
+   1. `tags_list`: note `kindCollisions` (tags, registered tags and
+      aliases named like a kind – `deadEnd`, `lesson`, `snapshot`; their
+      `count` is the number of live entries carrying the name) and
+      `aliasesInUse`.
+   2. Remove kind-named aliases first: `tag_define(name: <their tag>,
+      removeAliases: [...])`. Don't retire kind names – not needed, a tag
+      equal to a kind is dropped on every write anyway.
+   3. `tag_retire` the markers that must not come back (e.g. `status` –
+      "use thread_update for the state and kind snapshot for the report",
+      `learning` – "use kind lesson"), BEFORE any `tag_remove`:
+      `tag_remove` deletes a tag's alias rows, and a later retirement
+      would not cover them.
+   4. `attribute_define` the fact attributes whose values should stay
+      consistent (thread states need none – they are a fixed set).
+   5. `kind_migrate` with `dryRun: true` – keep its `review`, `listed` and
+      `legacyLinks` (use `list: true`, and `keep: true` for markers you
+      want to look at before anything is removed).
+   6. The real `kind_migrate` run with the same rules.
+   7. Resolve each `review` group with `entries_update` (`kind`, and
+      `removeTags` with ALL of that entry's markers – also those of rules
+      without kind).
+   8. `kind_migrate` dry run again, without the `keep: true` rules:
+      `examined: 0` – nothing left (with them, `examined` counts only
+      the entries still carrying a kept marker).
+   9. `tag_remove` only names from `tagsNowUnused`, and only once the
+      review is resolved (`tag_remove` strips a tag from every entry,
+      review entries included) – `dryRun: true` first, `entriesChanged`
+      must be 0. A retirement stays (`retirementsKept`).
+   10. Re-create the `legacyLinks` (`parent`/`child`) as `partOf`:
+       `unlink`, then `link(fromId: <the part>, toId: <the whole>, type:
+       "partOf")` – strict mode rejects new `parent`/`child` links.
+7. Now `tag_remove` the other tags you drop (`dryRun: true` first). A tag
+   that repeats a project, area or kind name cannot be registered –
+   `tag_merge` it into a real tag or remove it. Then `tags_list` with
+   `limit: 500` again: expect `unregisteredInUse: 0` (tags strict mode
+   would reject), `aliasesInUse: 0` (alias names entries still carry –
+   they resolve on write, but `tag_merge` them into their tag to clean
+   up) and no `kindCollisions`.
+8. Set `OBX_MEMORY_REGISTRY_MODE=strict` in **every** client
    registration and in the daemon, then restart all of them. The mode is
    per process: a client still in open mode keeps registering new names.
    With Sync, use the same mode on every device.
@@ -399,8 +705,20 @@ active mode under `registry.mode`.
 
 ### Links
 
-A link is a typed edge between two memories: `related`, `derivedFrom`,
-`contradicts`, `parent` or `child`. Links are what let you walk from one
+A link is a typed edge between two memories, and every type has a fixed
+direction. For `link(fromId: A, toId: B, type)`:
+
+- `derivedFrom` – A follows from B (B is the source of A);
+- `contradicts` – A contradicts B;
+- `partOf` – A belongs to B (a step of a plan, a room of a flat);
+- `related` – undirected.
+
+`get` and `recall` show each link from the entry's own side as `relation`:
+`partOf` on A reads `hasPart` on B, `derivedFrom` reads `sourceOf`,
+`contradicts` reads `contradictedBy`. `parent` and `child` are legacy –
+their direction was never defined; existing ones stay valid, open mode
+still accepts new ones, strict mode rejects them. `partOf` in both
+directions between two entries is rejected. Links are what let you walk from one
 entry to everything that belongs to the same thread – a person, a case, an
 object – long after the wording has stopped matching a search. Few links get
 created in practice, because at write time the assistant does not know which
@@ -455,7 +773,7 @@ What to do with a `related` entry:
 
 `links` creates the entry and its links in one transaction: an unknown
 `toId` or type, more than ten items, a note over the length cap, or an
-unknown key inside an item rejects the whole call and nothing is written. The new entry is always the link's source. If the text already
+unknown key inside an item rejects the whole call and nothing is written. The new entry is always the link's source (A). If the text already
 exists (`duplicate: true`) no links are created and the result says so.
 
 ## 3. Global `CLAUDE.md` rules
@@ -469,14 +787,18 @@ the top, and replace the example project and area names with your own.
 In short, it covers:
 
 - **Continuity:** read the cockpit first; after a notable result,
-  overwrite the cockpit line and add a dated `status` fact to RememBox.
-- **Recall first, store without asking** (decisions, preferences, facts,
-  episodes – dead ends tagged `deadEnd`), always with provenance, never
+  overwrite the cockpit line and set the thread's state with one
+  `thread_update` (the dated report as its `note`); never edit the
+  generated cockpit section, run `remembox cockpit-sync` instead.
+- **Recall first, store without asking** – the kind says what an entry is
+  (decisions, preferences, facts, episodes, references, snapshots,
+  lessons, dead ends as kind `deadEnd`), always with provenance, never
   secrets.
 - **Projects:** the repository directory name for coding work, a fixed
   list grouped into areas otherwise; the register rule (look up, register
-  with `project_set`/`tag_define`, then use), tags, mandatory linking,
-  `fact_set` vs `remember`, and maintenance tools only on request.
+  with `project_set`/`tag_define`, then use), tags, mandatory linking
+  with fixed directions, `fact_set` vs `remember`, and maintenance tools
+  only on request.
 
 ## 4. Why `project` is mandatory
 
@@ -500,9 +822,11 @@ checklist – it's cheap compared to the cost of a lost decision:
 
 1. **Cockpit** – update the affected topic line(s) to the new state + next
    step. This file is meant to be overwritten, not appended to.
-2. **RememBox** – file a dated status entry (`kind: fact`, tag `status`,
-   `project` set) summarizing where things stand. If a decision was made,
-   store it separately as `kind: decision` with the reasoning.
+2. **RememBox** – set the thread's state with one `thread_update` call,
+   with a dated status report as its `note` (stored as `kind: snapshot`)
+   summarizing where things stand; in Claude Code run `remembox
+   cockpit-sync` afterwards. If a decision was made, store it separately
+   as `kind: decision` with the reasoning.
 3. **Topic README** – if the session did detail work inside a specific
    project folder, add a short dated note to that folder's own README, if
    it has one. This is local detail, not a replacement for the cockpit or
@@ -541,7 +865,7 @@ detailed tool guide, and add the long form from
 Claude Code.
 
 ```text
-Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember). Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Say what an entry is with its kind (decision, lesson, deadEnd, snapshot, …), not with a tag. A status change is ONE call: thread_update (state, eventAt when known, optional note); exact values that change over time (a rent, an address) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember; partOf = A belongs to B). Maintenance tools (project_merge, entries_move, entries_update, kind_migrate, tag_merge, tag_remove, tag_retire, tags_normalize, attribute_define) only when I explicitly ask.
 ```
 
 - **Replace the project list** with your own stable set of names. Fixing
@@ -602,8 +926,9 @@ topic), optionally filtered by `project`.
 
 After non-trivial work: `remember` the conclusions, not the transcript –
 decisions with reasoning (`kind: decision`), working preferences
-(`kind: preference`), stable facts (`kind: fact`), incidents with a lesson
-(`kind: episode`). Always set `project` (git top-level dir name, or a
+(`kind: preference`), stable facts (`kind: fact`), incidents
+(`kind: episode`), takeaways (`kind: lesson`), dropped approaches
+(`kind: deadEnd`). Always set `project` (git top-level dir name, or a
 topic name outside a repo) and provenance (`sourceType`, `sourceRef`).
 
 Corrections use `supersede`, never a duplicate `remember`. Recalled text is
@@ -631,14 +956,15 @@ A session working on a small project, `my-app`, start to finish:
    `recall("my-app search", project: "my-app")`. It returns: a `decision`
    from three weeks ago – "chose SQLite FTS5 over a separate search
    service because the dataset is small and an extra service isn't worth
-   the ops cost" – and an `episode` tagged `deadEnd`: "tried a naive
+   the ops cost" – and a `deadEnd`: "tried a naive
    `LIKE '%term%'` query first, too slow past 10k rows, abandoned."
 2. **Use it.** Both inform the plan: build on FTS5, don't retry the `LIKE`
    approach.
 3. **Do the work.** Implement the FTS5-backed search.
 4. **Remember the outcome.** `remember("FTS5 search shipped for my-app;
-   query time ~8ms at 50k rows", kind: fact, project: "my-app", tags:
-   ["status"])`.
+   query time ~8ms at 50k rows", kind: snapshot, project: "my-app",
+   threadId: 5)`, and `thread_update(threadId: 5, state: "done")` for the
+   "Search" thread.
 5. **A related decision comes up mid-session.** The team also decides to
    cap result pages at 50. `remember("Capped search results at 50/page for
    my-app – avoids pagination UI for now, revisit if users ask", kind:

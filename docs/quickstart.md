@@ -175,7 +175,7 @@ loaded every time:
   so if you use both, paste the block in both places.
 
 ```text
-Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Exact values that change over time (a rent, an address, a stage) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember). Maintenance tools (project_merge, entries_move, tag_merge, tag_remove, tags_normalize) only when I explicitly ask.
+Memory (RememBox): At the start of every session, read my cockpit file (cockpit.md) first. Before any non-trivial task, call recall; store results afterwards. `project` is required and uses a fixed set of names – e.g. family, private, cats, company1, company2, finances (replace with your own list). Project names and tags come from a register: look them up first (areas_list, tags_list) and use an existing one; if nothing fits, register the new name first with a one-sentence description (project_set or tag_define), then use it – never invent spelling variants. Say what an entry is with its kind (decision, lesson, deadEnd, snapshot, …), not with a tag. A status change is ONE call: thread_update (state, eventAt when known, optional note); exact values that change over time (a rent, an address) go into fact_set, everything else into remember. Tags: camelCase, 3–5 per entry; never a project name, an area name or an identifier. After each remember or supersede, link the new entry to the entries it belongs to (the result lists candidates under related; use link, or links on remember; partOf = A belongs to B). Maintenance tools (project_merge, entries_move, entries_update, kind_migrate, tag_merge, tag_remove, tag_retire, tags_normalize, attribute_define) only when I explicitly ask.
 ```
 
 Replace the project list (`family, private, …`) with your own – short,
@@ -197,6 +197,11 @@ Code only) and `cockpit.md` (an example cockpit to adapt). Save your
 cockpit somewhere permanent and replace `cockpit.md` in the block with its
 full path. Clients with local file access (Claude Code, Cowork) then read
 it at the start of every session; the web and mobile apps cannot.
+
+Claude Code users who keep a cockpit can also let a hook script refresh its
+generated thread section automatically: it is the file
+`hooks/cockpit-sync-hook.sh` in the same `remembox` folder, and the
+[README](../README.md) shows the `settings.json` entry. This is optional.
 
 ## Step 6: Test it 🎉
 

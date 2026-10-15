@@ -364,9 +364,14 @@ extension MemoryServiceRegistry on MemoryService {
       _facts.query(Fact_.project.equals(name, caseSensitive: true)),
       (q) => q.count(),
     );
+    final threads = _useQuery(
+      _threads.query(Thread_.project.equals(name, caseSensitive: true)),
+      (q) => q.count(),
+    );
     final inUse = <String>[
       if (entries > 0) '$entries entr${entries == 1 ? 'y' : 'ies'}',
       if (facts > 0) '$facts fact${facts == 1 ? '' : 's'}',
+      if (threads > 0) '$threads thread${threads == 1 ? '' : 's'}',
     ];
     // Not "run reindex": reindex registers every name in use at once,
     // spelling variants included and without descriptions – the one-time
@@ -484,12 +489,13 @@ extension MemoryServiceRegistry on MemoryService {
 
   /// Read. Distinct, exact (case-sensitive) project strings referenced by
   /// [MemoryEntry.project] and, when [includeFacts] is true (the
-  /// default), also [Fact.project] – the shared "which project names are
-  /// actually in use" primitive shared by `backfillProjectRegistry`,
-  /// `areasList` and `stats` (integration follow-up, 2026-09-21, areas
-  /// and facts (0.3.0): those had each grown their own copy of this
-  /// exact query while working in parallel – folded into one here per
-  /// CLAUDE.md "No duplicated logic").
+  /// default), also [Fact.project], and, when [includeThreads] is true
+  /// (the default, 0.5.0), also [Thread.project] – the shared "which
+  /// project names are actually in use" primitive shared by
+  /// `backfillProjectRegistry`, `areasList` and `stats` (integration
+  /// follow-up, 2026-09-21, areas and facts (0.3.0): those had each grown
+  /// their own copy of this exact query while working in parallel –
+  /// folded into one here per CLAUDE.md "No duplicated logic").
   ///
   /// Blanks (`''`) are returned as-is, not filtered – callers that treat
   /// a blank project string specially (e.g. `blankProjectEntries`) do
@@ -498,7 +504,10 @@ extension MemoryServiceRegistry on MemoryService {
   /// case-INsensitive, so `distinct`/`caseSensitive` are always set
   /// explicitly here (belt-and-braces; the store itself already defaults
   /// case-sensitive).
-  Set<String> _distinctUsedProjects({bool includeFacts = true}) {
+  Set<String> _distinctUsedProjects({
+    bool includeFacts = true,
+    bool includeThreads = true,
+  }) {
     final fromEntries = _useQuery(_entries.query(), (q) {
       final prop = q.property(MemoryEntry_.project)
         ..distinct = true
@@ -509,18 +518,36 @@ extension MemoryServiceRegistry on MemoryService {
         prop.close();
       }
     });
-    if (!includeFacts) return fromEntries.toSet();
-    final fromFacts = _useQuery(_facts.query(), (q) {
-      final prop = q.property(Fact_.project)
-        ..distinct = true
-        ..caseSensitive = true;
-      try {
-        return prop.find();
-      } finally {
-        prop.close();
-      }
-    });
-    return {...fromEntries, ...fromFacts};
+    final used = fromEntries.toSet();
+    if (includeFacts) {
+      used.addAll(
+        _useQuery(_facts.query(), (q) {
+          final prop = q.property(Fact_.project)
+            ..distinct = true
+            ..caseSensitive = true;
+          try {
+            return prop.find();
+          } finally {
+            prop.close();
+          }
+        }),
+      );
+    }
+    if (includeThreads) {
+      used.addAll(
+        _useQuery(_threads.query(), (q) {
+          final prop = q.property(Thread_.project)
+            ..distinct = true
+            ..caseSensitive = true;
+          try {
+            return prop.find();
+          } finally {
+            prop.close();
+          }
+        }),
+      );
+    }
+    return used;
   }
 
   /// Read. Count of [MemoryEntry] rows whose `project` is blank per
@@ -533,7 +560,10 @@ extension MemoryServiceRegistry on MemoryService {
   /// (registry-scale), never a box-wide scan.
   int _countBlankProjectEntries() {
     var total = 0;
-    for (final name in _distinctUsedProjects(includeFacts: false)) {
+    for (final name in _distinctUsedProjects(
+      includeFacts: false,
+      includeThreads: false,
+    )) {
       if (!MemoryService._isBlankProject(name)) continue;
       total += _useQuery(
         _entries.query(MemoryEntry_.project.equals(name, caseSensitive: true)),

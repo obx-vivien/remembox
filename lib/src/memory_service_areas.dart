@@ -42,14 +42,26 @@ const int _entriesMoveMaxTotalIds = 2000;
 /// duplicates (a caller-side mistake, not a legitimate double-move – a
 /// duplicate would otherwise silently double-count in `moved`/
 /// `fromProjects`).
-List<int> _requireMoveIds(List<int> ids) {
+List<int> _requireMoveIds(List<int> ids) =>
+    _requireEntryIds(ids, tool: 'entries_move');
+
+/// The `ids` rule shared by `entries_move`, (0.5.0) `entries_update` and
+/// `thread_update`'s `attachEntryIds`: 1..[max] (default
+/// [_entriesMoveMaxIds]) positive integers, no duplicates. [tool]
+/// prefixes every message, [field] names the argument.
+List<int> _requireEntryIds(
+  List<int> ids, {
+  required String tool,
+  String field = 'ids',
+  int max = _entriesMoveMaxIds,
+}) {
   if (ids.isEmpty) {
-    throw ValidationException('entries_move: "ids" must not be empty.');
+    throw ValidationException('$tool: "$field" must not be empty.');
   }
-  if (ids.length > _entriesMoveMaxIds) {
+  if (ids.length > max) {
     throw ValidationException(
-      'entries_move: "ids" has ${ids.length} entries, exceeding the '
-      '$_entriesMoveMaxIds id limit.',
+      '$tool: "$field" has ${ids.length} entries, exceeding the '
+      '$max id limit.',
     );
   }
   final seen = <int>{};
@@ -57,7 +69,7 @@ List<int> _requireMoveIds(List<int> ids) {
   for (final id in ids) {
     if (id < 1) {
       throw ValidationException(
-        'entries_move: id $id must be a positive integer (ids start at '
+        '$tool: id $id must be a positive integer (ids start at '
         '1).',
       );
     }
@@ -66,7 +78,7 @@ List<int> _requireMoveIds(List<int> ids) {
   if (duplicates.isNotEmpty) {
     final sortedDuplicates = duplicates.toList()..sort();
     throw ValidationException(
-      'entries_move: duplicate id(s) in "ids": '
+      '$tool: duplicate id(s) in "$field": '
       '${sortedDuplicates.join(', ')}.',
     );
   }
@@ -258,13 +270,15 @@ extension MemoryServiceAreas on MemoryService {
               entry.key,
         ];
 
-        // Distinct MemoryEntry.project strings with no ProjectScope row –
+        // Distinct MemoryEntry.project (0.5.0: and Thread.project) strings
+        // with no ProjectScope row –
         // property projection with explicit distinct+caseSensitive (F3:
         // distinct string projections default to case-INSENSITIVE, which
         // would wrongly collapse e.g. "acme-app"/"Acme-App"). Blank
         // (`''`) is excluded here and reported separately as
         // blankProjectEntries instead – it is not an "unregistered
         // project name", it is missing data.
+        // 0.5.0: thread projects count as used too (amendment A10).
         final usedEntryProjects = _distinctUsedProjects(includeFacts: false);
         final unregisteredProjects = <String>[
           for (final name in usedEntryProjects)
@@ -284,7 +298,7 @@ extension MemoryServiceAreas on MemoryService {
             '${unregisteredProjects.length} project name(s) are used on '
             // `backfill_project_registry` is not an MCP tool name a
             // caller can act on directly – `reindex` runs it.
-            'entries but have no registry row – run reindex (or '
+            'entries or threads but have no registry row – run reindex (or '
             'project_set) to register them: '
             '${unregisteredProjects.map((p) => '"${MemoryService.sanitizeForLog(p)}"').join(', ')}.',
           );
@@ -479,7 +493,18 @@ extension MemoryServiceAreas on MemoryService {
           (q) => q.findIds(),
         );
 
-        if (entryIds.isEmpty && factIds.isEmpty && fromScope == null) {
+        // 0.5.0: threads move with their project.
+        final threadIds = _useQuery(
+          _threads.query(
+            Thread_.project.equals(validatedFrom, caseSensitive: true),
+          ),
+          (q) => q.findIds(),
+        );
+
+        if (entryIds.isEmpty &&
+            factIds.isEmpty &&
+            threadIds.isEmpty &&
+            fromScope == null) {
           throw ValidationException(
             'project_merge: nothing to merge – project '
             '"${MemoryService.sanitizeForLog(validatedFrom)}" has no '
@@ -573,6 +598,44 @@ extension MemoryServiceAreas on MemoryService {
             }
           }
           if (!dryRun) _facts.putMany(rows);
+        }
+
+        // Threads (0.5.0): same chunked move; a move changes the thread
+        // (version +1, amendment A3). A live thread whose title already has
+        // a live thread under `into` is NOT resolved silently: both rows
+        // stay and the pair is reported – until the caller renames one or
+        // drops it, thread_update by that title rejects as ambiguous.
+        final threadTitleConflicts = <Map<String, Object?>>[];
+        for (var i = 0; i < threadIds.length; i += MemoryService._scanPageSize) {
+          final chunkIds = threadIds.sublist(
+            i,
+            math.min(i + MemoryService._scanPageSize, threadIds.length),
+          );
+          final rows = _threads
+              .getMany(chunkIds)
+              .whereType<Thread>()
+              .toList(growable: false);
+          for (final row in rows) {
+            if (row.isLive) {
+              final clash = _threadsByTitle(
+                validatedInto,
+                row.titleKey,
+                live: true,
+              ).firstOrNull;
+              if (clash != null) {
+                threadTitleConflicts.add({
+                  'threadId': row.id,
+                  'title': row.title,
+                  'conflictsWithThreadId': clash.id,
+                });
+              }
+            }
+            row
+              ..project = validatedInto
+              ..version = row.version + 1
+              ..updatedAt = now;
+          }
+          if (!dryRun) _threads.putMany(rows);
         }
 
         // Memberships: create target memberships for the same areas,
@@ -683,6 +746,22 @@ extension MemoryServiceAreas on MemoryService {
           'entries=${entryIds.length} facts=${factIds.length} '
           'areasCarried=${areasCarried.length} dryRun=$dryRun',
         );
+        if (threadIds.isNotEmpty) {
+          log(
+            '[memory] project_merge moved ${threadIds.length} thread(s), '
+            '${threadTitleConflicts.length} title conflict(s) '
+            'dryRun=$dryRun',
+          );
+          if (threadTitleConflicts.isNotEmpty) {
+            warnings.add(
+              '${threadTitleConflicts.length} moved thread(s) have the title '
+              'of a live thread already in '
+              '"${MemoryService.sanitizeForLog(validatedInto)}" (see '
+              'threadTitleConflicts) – both are kept; resolve with '
+              'thread_update: rename one, or set state dropped.',
+            );
+          }
+        }
 
         final result = <String, Object?>{
           'from': validatedFrom,
@@ -695,6 +774,12 @@ extension MemoryServiceAreas on MemoryService {
           'fromStatus': ProjectStatus.merged,
           'mergedInto': validatedInto,
           'intoReactivated': intoReactivated,
+          // 0.5.0: only when the project had threads (keeps the result of
+          // a thread-free merge unchanged).
+          if (threadIds.isNotEmpty) ...{
+            'threadsMoved': threadIds.length,
+            'threadTitleConflicts': threadTitleConflicts,
+          },
         };
         if (warnings.isNotEmpty) result['warning'] = warnings.join(' ');
         return dryRun ? result : _applyGuardPeerWarning(result);
@@ -705,6 +790,29 @@ extension MemoryServiceAreas on MemoryService {
   // ---------------------------------------------------------------------
   // entriesMove
   // ---------------------------------------------------------------------
+
+  /// Loads every entry in [ids] with one `getMany` round-trip and throws a
+  /// [ValidationException] naming EVERY missing id (`TOOL: id(s) do not
+  /// exist, NOTHING: …`) – shared by `entries_move` and (0.5.0)
+  /// `entries_update`. Run inside the caller's transaction before any
+  /// mutation, so a missing id leaves nothing written.
+  List<MemoryEntry> _requireEntriesExist(
+    List<int> ids, {
+    required String tool,
+    required String nothing,
+  }) {
+    final rows = _entries.getMany(ids);
+    final missing = <int>[];
+    for (var i = 0; i < ids.length; i++) {
+      if (rows[i] == null) missing.add(ids[i]);
+    }
+    if (missing.isNotEmpty) {
+      throw ValidationException(
+        '$tool: id(s) do not exist, $nothing: ${missing.join(', ')}.',
+      );
+    }
+    return rows.cast<MemoryEntry>();
+  }
 
   /// Moves SELECTED [MemoryEntry] rows (by id) into [toProject] – splits a
   /// catch-all project, as opposed to [projectMerge], which moves a WHOLE
@@ -770,17 +878,11 @@ extension MemoryServiceAreas on MemoryService {
         // Every requested id must exist – one getMany round-trip (not one
         // query per id), checked BEFORE any mutation so a missing id rolls
         // the whole transaction back with nothing written.
-        final requestedRows = _entries.getMany(validatedIds);
-        final missing = <int>[];
-        for (var i = 0; i < validatedIds.length; i++) {
-          if (requestedRows[i] == null) missing.add(validatedIds[i]);
-        }
-        if (missing.isNotEmpty) {
-          throw ValidationException(
-            'entries_move: id(s) do not exist, nothing moved: '
-            '${missing.join(', ')}.',
-          );
-        }
+        _requireEntriesExist(
+          validatedIds,
+          tool: 'entries_move',
+          nothing: 'nothing moved',
+        );
 
         // includeChain: BFS over `supersededBy` (ToOne, old -> new) in
         // BOTH directions – forward via the entity's own relation,

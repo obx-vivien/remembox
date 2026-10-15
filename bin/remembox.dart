@@ -26,6 +26,7 @@ import 'dart:async';
 import 'dart:io' as io;
 
 import 'package:dart_mcp/stdio.dart';
+import 'package:remembox/src/cockpit_sync.dart';
 import 'package:remembox/src/embedder.dart';
 import 'package:remembox/src/http_transport.dart';
 import 'package:remembox/src/instance_guard.dart';
@@ -36,6 +37,16 @@ import 'package:remembox/src/store_gate.dart';
 
 Future<void> main(List<String> args) async {
   void log(String message) => io.stderr.writeln(message);
+
+  // 0.5.0: `remembox cockpit-sync` – a short-lived CLI run, not a server:
+  // dispatched before any server, guard or store work (it opens the store
+  // itself, as one gated lending – see lib/src/cockpit_sync.dart).
+  // io.exit, not exitCode: a startup probe that timed out next to a
+  // persistent-mode holder leaves a lock request pending, which would keep
+  // the process alive forever.
+  if (args.isNotEmpty && args.first == 'cockpit-sync') {
+    io.exit(await runCockpitSync(args.skip(1).toList(), log: log));
+  }
 
   // serveMode is computed before config: MemoryConfig.fromEnvironment needs
   // it to resolve the store-mode default (2026-09-09, store mode derived

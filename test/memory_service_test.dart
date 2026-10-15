@@ -850,6 +850,8 @@ void main() {
       expect(result['indexRowsRemoved'], 1);
       expect(result['memoryLinksRemoved'], 1);
       expect(result['tagLinksRemoved'], 1);
+      // 0.5.0: the thread-attachment cascade reports its (zero) count.
+      expect(result['threadEntriesRemoved'], 0);
 
       expect(entries().get(aId), isNull);
       expect(

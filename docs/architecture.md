@@ -16,6 +16,11 @@ Claude ◄───────────────────────�
                                         │          │ @Sync  Fact ─ToOne→ MemoryEntry (explainedBy)
                                         │          │ @Sync  TagDefinition (name-keyed, no relation)
                                         │          │ @Sync  TagAlias (alias -> tag name, no relation)
+                                        │          │ @Sync  TagRetirement, AttributeDefinition,
+                                        │          │        AttributeValue (name-keyed)
+                                        │          │ @Sync  Thread ◄─ToOne─ ThreadState (history)
+                                        │          │ @Sync  ThreadEntry ─ToOne→ Thread, MemoryEntry
+                                        │          │ local  ThreadOp (idempotency, plain threadId)
                                         │          │ ─────────────────────────
                                         └────────► │ local  MemoryIndex        │
                                                    │        (HNSW 768, cosine) │
@@ -30,7 +35,7 @@ contract citations):
   and the only box nearest-neighbor queries run against. Retrieval hydrates
   `MemoryEntry` rows afterwards. No second vector path exists
   (contract: objectbox-capabilities.md §6).
-- **Synced vs local-only is explicit.** The four domain entities are
+- **Synced vs local-only is explicit.** The domain entities are
   `@Sync()` (they are the durable knowledge that replicates); the index is
   deliberately NOT – embeddings are large, device-local and recomputable, so
   it references entries by plain id/sourceKey instead of a relation across
@@ -135,6 +140,101 @@ logged as written, so a rejection leaves nothing behind and cannot race
 the write. Read tools behave the same in both modes; `reindex` still
 registers every project name already in use, which is the migration path
 into strict mode.
+
+## Retired tags, attribute values and in-place edits (0.5.0)
+
+Three entities were added after 0.4.0, additive-only again – the eleven
+earlier entities are byte-identical (pinned by `test/model_compat_test.dart`
+against the frozen 0.4.0 model):
+
+- `TagRetirement` – one row per retired tag name (`name` unique, `hint`,
+  `aliasOf` = the retired tag for an alternative name retired with it,
+  `''` for the tag itself).
+- `AttributeDefinition` – one row per registered fact attribute (`name`
+  unique = exactly `Fact.attribute`, `description`).
+- `AttributeValue` – one row per allowed value (`key` unique =
+  attribute + `<sep>` + value, `attribute`, `value`, `position`).
+
+**Why new entities, not new properties.** Retirement could have been a
+flag on `TagDefinition`, the allowed values a list on it. But a property
+added to a shipped entity changes that entity's model, and a Sync peer
+still running an older binary drops the field it does not know – silently.
+New entities leave every shipped entity untouched; an older binary refuses
+the store outright (higher last entity id) instead of half-reading it. All
+three are `@Sync()`, name-keyed and relation-free, like `TagAlias` and
+`AreaMembership`, for the same cross-device-replace reason.
+
+**One place per rule.** `_prepareTags` checks retirements (Step 1a,
+before alias resolution, only when any retirement exists);
+`_checkAttributeValue` checks a `fact_set` value against the register
+(inside the write transaction, before anything is written, a no-op while
+no attribute is registered). Strict mode rejects through `_rejectStrict`,
+open mode warns – so a store without retirements or attribute
+definitions behaves exactly as before.
+
+**Kinds and links are constants, not entities.** The three new kinds
+(`snapshot`, `lesson`, `deadEnd`) and the new link type `partOf` are
+values of the existing `kind`/`linkType` strings. How a link reads from
+each end (`partOf`/`hasPart`, …) is computed on read
+(`LinkType.relationFrom`); nothing about it is stored.
+
+**In-place edits never touch content.** `entries_update` and
+`kind_migrate` change only `MemoryEntry.kind` and the tags relation. Kind
+and tags are not part of `contentHash` or of the embedded text, so the
+index row stays valid – no re-embedding, no stale row.
+
+## Threads (0.5.0)
+
+Four more entities, additive-only again (pinned by
+`test/model_compat_test.dart`): `Thread` (title, `titleKey`, project, the
+denormalized current state, `pausedUntil`, `version`), `ThreadState` (one
+row per asserted state: `eventAt` – null when unknown, never defaulted –
+`recordedAt`, `asHistory`), `ThreadEntry` (thread ↔ entry, with
+`attachedAt` and `via`) and `ThreadOp` (one row per `thread_update` call
+with an `idempotencyKey`).
+
+**A link entity, not a `ToMany`.** "Entries of thread T" and "threads of
+entry E" are each one indexed query on a `ThreadEntry` ToOne, the edge
+carries metadata, `forget(hard)` removes an entry's rows with one
+`query.remove()` like it does for `MemoryLink`, and `lastRelationId` stays
+untouched.
+
+**Sync.** `Thread`, `ThreadState` and `ThreadEntry` are `@Sync()` and have
+no `@Unique` property, so there is no Sync-mandated replace hazard. "At
+most one live thread per (project, title)" is therefore a write-path rule
+(query-first inside the one write transaction of `thread_update`), exactly
+like "one current fact per key": two devices can still create the same
+title independently – a call by title then sees two live rows and is
+rejected with both ids, `thread_list` shows both. `version` is a
+per-device optimistic check; across devices the last write wins, as for
+every other synced row. A `ThreadEntry` can dangle after a cross-device
+`MemoryEntry` replace – the same hazard as `MemoryLink`; `thread_get`
+reports such rows instead of hiding them. `ThreadOp` is local-only (a
+per-device retry trace, contract §8), references the thread by plain id,
+and may therefore carry a fail-on-conflict `@Unique` key; rows older than
+30 days are pruned by `thread_update`.
+
+**The current state** is the newest `ThreadState` row by (`recordedAt`,
+id) that is not `asHistory`; `Thread.state`/`stateEventAt`/
+`stateRecordedAt` are a copy, recomputed on every `thread_update`
+(`thread_get` is read-only and reports a disagreement; the next
+`thread_update` repairs it). `recordedAt` is taken inside the write
+transaction, under `store.lock`, and a new current row is recorded at
+least 1 ms after every earlier one – so the call that commits last is
+current, and a result never reports a state that did not become current.
+Late information dated before the latest known state date is written
+with `asHistory: true` – it never becomes current. Whether a thread is
+live is always read from its history, never from the stored copy alone
+(a by-title call resolves by it). The allowed states are a fixed set
+(`ThreadStates`), not the attribute register: filters, closed-detection
+and the cockpit symbols depend on them.
+
+**The cockpit sync** (`remembox cockpit-sync`, `lib/src/cockpit_sync.dart`)
+is a short-lived CLI process, not an MCP tool – the server has no tool that
+writes files. It is a second sanctioned opener of the store: one gated
+lending behind `store.lock` (never a second open store next to a
+lending), no embedder, through the same `readThreadRows` projection
+`thread_list` uses.
 
 ## Ranking
 

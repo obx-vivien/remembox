@@ -5,7 +5,7 @@
 /// open-mode pin (open mode must behave exactly as before).
 ///
 /// Synthetic data only: projects `acme-app`, `garden`, `family`; areas
-/// `work`, `home`; tags `lesson`, `status`, `alice`, `appsScript`.
+/// `work`, `home`; tags `insight`, `status`, `alice`, `appsScript`.
 library;
 
 import 'dart:io';
@@ -126,7 +126,7 @@ void main() {
       expect(openRegistry['mode'], 'open');
       expect(openRegistry['tagDefinitions'], 0);
 
-      defs().put(TagDefinition(name: 'lesson', description: 'Learned.'));
+      defs().put(TagDefinition(name: 'insight', description: 'Learned.'));
       final strictStats = await strict.stats();
       final strictRegistry = strictStats['registry'] as Map<String, Object?>;
       expect(strictRegistry['mode'], 'strict');
@@ -508,20 +508,20 @@ void main() {
 
     test('an unregistered tag is rejected with a suggestion; nothing is '
         'written', () async {
-      await define('lesson');
+      await define('insight');
       await expectStrictRejection(
         () => strict.remember(
           text: 'probe',
           project: 'garden',
-          tags: ['lessons'],
+          tags: ['insights'],
         ),
         tool: 'remember',
         messageContains: [
-          // "lessons" is a spelling variant of "lesson", so tag_define
+          // "insights" is a spelling variant of "insight", so tag_define
           // would refuse it without allowSimilar – no plain "register it"
           // advice.
-          'tag(s) not registered (strict registry mode): "lessons" '
-              '(similar registered tag: "lesson"; tag_define accepts it only '
+          'tag(s) not registered (strict registry mode): "insights" '
+              '(similar registered tag: "insight"; tag_define accepts it only '
               'with allowSimilar: true). Use a registered tag or drop it. '
               'tags_list shows every registered tag. Nothing was written.',
         ],
@@ -530,16 +530,16 @@ void main() {
 
     test('every unregistered tag is listed, with its raw spelling when it '
         'was normalized', () async {
-      await define('lesson');
+      await define('insight');
       await expectStrictRejection(
         () => strict.remember(
           text: 'probe',
           project: 'garden',
-          tags: ['lesson', 'lessons', 'garden-tools'],
+          tags: ['insight', 'insights', 'garden-tools'],
         ),
         tool: 'remember',
         messageContains: [
-          '"lessons" (similar registered tag: "lesson"; tag_define accepts '
+          '"insights" (similar registered tag: "insight"; tag_define accepts '
               'it only with allowSimilar: true), "gardenTools" (from '
               '"garden-tools"; no similar registered tag). Use a registered '
               'tag or drop it. If a tag is genuinely new, register it first '
@@ -550,7 +550,7 @@ void main() {
 
     test('registered tags are accepted, matched on the normalized name',
         () async {
-      await define('lesson');
+      await define('insight');
       await strict.tagDefine(
         name: 'apps-script',
         description: 'Automation scripts.',
@@ -558,9 +558,9 @@ void main() {
       final r = await strict.remember(
         text: 'tagged',
         project: 'garden',
-        tags: ['Lesson', 'apps-script'],
+        tags: ['Insight', 'apps-script'],
       );
-      expect(tagsOf(r), ['appsScript', 'lesson']);
+      expect(tagsOf(r), ['appsScript', 'insight']);
     });
 
     test('blank, control-character and redundant tags are dropped with a '
@@ -610,11 +610,11 @@ void main() {
     test('suggestions are deterministic: same loose key first, then '
         'containment, at most three', () async {
       for (final t in [
-        'lessonsLearned',
-        'lessonPlan',
-        'lessonsTaught',
-        'les',
-        'lesson',
+        'insightsLearned',
+        'insightPlan',
+        'insightsTaught',
+        'ins',
+        'insight',
       ]) {
         await strict.tagDefine(
           name: t,
@@ -622,15 +622,15 @@ void main() {
           allowSimilar: true,
         );
       }
-      // "lesson" shares the loose key; "les" (length difference 4),
-      // "lessonsTaught" (6) and "lessonsLearned" (7) contain or are
-      // contained in "lessons"; "lessonPlan" is neither. Capped at three.
+      // "insight" shares the loose key; "ins" (length difference 5),
+      // "insightsTaught" (6) and "insightsLearned" (7) contain or are
+      // contained in "insights"; "insightPlan" is neither. Capped at three.
       await expectStrictRejection(
-        () => strict.remember(text: 'p', project: 'garden', tags: ['lessons']),
+        () => strict.remember(text: 'p', project: 'garden', tags: ['insights']),
         tool: 'remember',
         messageContains: [
-          '"lessons" (similar registered tags: "lesson", "les", '
-              '"lessonsTaught"; tag_define accepts it only with allowSimilar: '
+          '"insights" (similar registered tags: "insight", "ins", '
+              '"insightsTaught"; tag_define accepts it only with allowSimilar: '
               'true)',
         ],
       );
@@ -660,12 +660,12 @@ void main() {
     test('a missing, blank or too long description is rejected', () async {
       for (final description in [null, '  ']) {
         await expectLater(
-          strict.tagDefine(name: 'lesson', description: description),
+          strict.tagDefine(name: 'insight', description: description),
           throwsA(isA<ValidationException>()),
         );
       }
       await expectLater(
-        strict.tagDefine(name: 'lesson', description: 'x' * 1025),
+        strict.tagDefine(name: 'insight', description: 'x' * 1025),
         throwsA(
           isA<ValidationException>().having(
             (e) => e.message,
@@ -679,12 +679,12 @@ void main() {
 
     test('the missing-description message says what is needed', () async {
       await expectLater(
-        strict.tagDefine(name: 'lesson'),
+        strict.tagDefine(name: 'insight'),
         throwsA(
           isA<ValidationException>().having(
             (e) => e.message,
             'message',
-            'tag_define: "lesson" is not registered yet – a description is '
+            'tag_define: "insight" is not registered yet – a description is '
                 'required to register a new tag (one sentence: what the tag '
                 'marks).',
           ),
@@ -693,16 +693,16 @@ void main() {
     });
 
     test('an existing definition is updated or left unchanged', () async {
-      await define('lesson');
-      final same = await strict.tagDefine(name: 'lesson');
+      await define('insight');
+      final same = await strict.tagDefine(name: 'insight');
       expect(same['action'], 'unchanged');
       final again = await strict.tagDefine(
-        name: 'lesson',
-        description: 'Synthetic tag lesson.',
+        name: 'insight',
+        description: 'Synthetic tag insight.',
       );
       expect(again['action'], 'unchanged');
       final updated = await strict.tagDefine(
-        name: 'lesson',
+        name: 'insight',
         description: 'What we learned the hard way.',
       );
       expect(updated['action'], 'updated');
@@ -714,22 +714,22 @@ void main() {
 
     test('a loose-key variant of a definition is rejected unless '
         'allowSimilar', () async {
-      await define('lesson');
+      await define('insight');
       await expectLater(
-        strict.tagDefine(name: 'lessons', description: 'Plural.'),
+        strict.tagDefine(name: 'insights', description: 'Plural.'),
         throwsA(
           isA<ValidationException>().having(
             (e) => e.message,
             'message',
-            'tag_define: "lessons" looks like a variant of the registered tag '
-                '"lesson" (same word apart from case, plural or separators). '
-                'Use "lesson", or pass allowSimilar: true if "lessons" is '
+            'tag_define: "insights" looks like a variant of the registered tag '
+                '"insight" (same word apart from case, plural or separators). '
+                'Use "insight", or pass allowSimilar: true if "insights" is '
                 'genuinely a different label.',
           ),
         ),
       );
       final r = await strict.tagDefine(
-        name: 'lessons',
+        name: 'insights',
         description: 'Plural.',
         allowSimilar: true,
       );
@@ -785,20 +785,20 @@ void main() {
 
     test('an identifier-like name warns; unregistered spelling variants in '
         'use suggest tag_merge', () async {
-      await open.remember(text: 'legacy', project: 'garden', tags: ['Lesson']);
+      await open.remember(text: 'legacy', project: 'garden', tags: ['Insight']);
       final r = await strict.tagDefine(name: 't42', description: 'Ticket.');
       expect(r['warning'], contains('looks like an identifier or version'));
       final l = await strict.tagDefine(
-        name: 'lessons',
+        name: 'insights',
         description: 'What we learned.',
       );
-      // "Lesson" was stored as "lesson" by remember's normalization.
+      // "Insight" was stored as "insight" by remember's normalization.
       expect(
         l['warning'],
         contains(
-          'Existing unregistered tag "lesson" looks like a spelling variant '
-          'of "lessons" – consider tag_merge (from: ["lesson"], into: '
-          '"lessons").',
+          'Existing unregistered tag "insight" looks like a spelling variant '
+          'of "insights" – consider tag_merge (from: ["insight"], into: '
+          '"insights").',
         ),
       );
     });
@@ -821,7 +821,7 @@ void main() {
       await open.remember(text: 'a', project: 'garden', tags: ['status']);
       await open.remember(text: 'b', project: 'garden', tags: ['alice']);
       await define('status');
-      await define('lesson'); // registered, never used
+      await define('insight'); // registered, never used
       final r = await strict.tagsList();
       final rows = (r['tags'] as List).cast<Map<String, Object?>>();
       expect(rows, [
@@ -835,10 +835,10 @@ void main() {
         },
         {'name': 'alice', 'count': 1, 'registered': false, 'description': null},
         {
-          'name': 'lesson',
+          'name': 'insight',
           'count': 0,
           'registered': true,
-          'description': 'Synthetic tag lesson.',
+          'description': 'Synthetic tag insight.',
           'aliases': <String>[],
         },
       ]);
@@ -864,14 +864,14 @@ void main() {
     });
 
     test('a definition-only name joins variantGroups', () async {
-      await open.remember(text: 'a', project: 'garden', tags: ['lessons']);
-      await define('lesson');
+      await open.remember(text: 'a', project: 'garden', tags: ['insights']);
+      await define('insight');
       final r = await open.tagsList();
       final groups = (r['variantGroups'] as List).cast<Map<String, Object?>>();
       final names = (groups.single['tags'] as List)
           .cast<Map<String, Object?>>()
           .map((t) => t['name']);
-      expect(names, unorderedEquals(['lesson', 'lessons']));
+      expect(names, unorderedEquals(['insight', 'insights']));
     });
 
     test('areas_list lists the register: projects with description and '
@@ -912,41 +912,41 @@ void main() {
 
     test('tag_merge carries a "from" definition to an unregistered target',
         () async {
-      await open.remember(text: 'a', project: 'garden', tags: ['lessons']);
-      await strict.tagDefine(name: 'lessons', description: 'Learned.');
+      await open.remember(text: 'a', project: 'garden', tags: ['insights']);
+      await strict.tagDefine(name: 'insights', description: 'Learned.');
       logLines.clear();
-      final r = await strict.tagMerge(from: ['lessons'], into: 'lesson');
+      final r = await strict.tagMerge(from: ['insights'], into: 'insight');
       expect(r['intoDefinition'], 'carried');
-      expect(r['carriedFrom'], 'lessons');
+      expect(r['carriedFrom'], 'insights');
       expect(r['definitionsRemoved'], 1);
       expect(defs().getAll().map((d) => (d.name, d.description)), [
-        ('lesson', 'Learned.'),
+        ('insight', 'Learned.'),
       ]);
       expect(
         logLines,
         contains(
           startsWith('[memory] tag_merge: carried the definition of '
-              '"lessons" to "lesson"'),
+              '"insights" to "insight"'),
         ),
       );
     });
 
     test('tag_merge keeps the target definition and logs a dropped "from" '
         'description', () async {
-      await define('lesson');
+      await define('insight');
       await strict.tagDefine(
-        name: 'lessons',
+        name: 'insights',
         description: 'Plural spelling.',
         allowSimilar: true,
       );
       logLines.clear();
-      final r = await strict.tagMerge(from: ['lessons'], into: 'lesson');
+      final r = await strict.tagMerge(from: ['insights'], into: 'insight');
       expect(r['intoDefinition'], 'kept');
       expect(r.containsKey('carriedFrom'), isFalse);
       expect(r['definitionsRemoved'], 1);
       // A definition-only "from" is not "not found".
       expect(r['notFound'], isEmpty);
-      expect(defs().getAll().single.description, 'Synthetic tag lesson.');
+      expect(defs().getAll().single.description, 'Synthetic tag insight.');
       expect(
         logLines,
         contains(contains('its description was not carried over: '
@@ -975,33 +975,33 @@ void main() {
     });
 
     test('tag_merge dryRun reports the same without writing', () async {
-      await open.remember(text: 'a', project: 'garden', tags: ['lessons']);
-      await strict.tagDefine(name: 'lessons', description: 'Learned.');
+      await open.remember(text: 'a', project: 'garden', tags: ['insights']);
+      await strict.tagDefine(name: 'insights', description: 'Learned.');
       final dry = await strict.tagMerge(
-        from: ['lessons'],
-        into: 'lesson',
+        from: ['insights'],
+        into: 'insight',
         dryRun: true,
       );
       expect(dry['intoDefinition'], 'carried');
       expect(dry['definitionsRemoved'], 1);
-      expect(defs().getAll().single.name, 'lessons');
-      expect(tags().getAll().single.name, 'lessons');
+      expect(defs().getAll().single.name, 'insights');
+      expect(tags().getAll().single.name, 'insights');
     });
 
     test('tag_remove removes matching definitions (dryRun writes nothing)',
         () async {
       await open.remember(text: 'a', project: 'garden', tags: ['status']);
       await define('status');
-      await define('lesson'); // definition only
+      await define('insight'); // definition only
       final dry = await open.tagRemove(
-        tags: ['status', 'lesson'],
+        tags: ['status', 'insight'],
         dryRun: true,
       );
       expect(dry['definitionsRemoved'], 2);
       expect(dry['notFound'], isEmpty);
       expect(defs().count(), 2);
       logLines.clear();
-      final r = await open.tagRemove(tags: ['status', 'lesson', 'nope']);
+      final r = await open.tagRemove(tags: ['status', 'insight', 'nope']);
       expect(r['definitionsRemoved'], 2);
       expect(r['tagsRemoved'], 1);
       expect(r['notFound'], ['nope']);
@@ -1361,14 +1361,14 @@ void main() {
 
       test('strict: a carry that would create a variant of a registered '
           'tag is rejected', () async {
-        await define('lesson');
+        await define('insight');
         await expectStrictRejection(
-          () => strict.tagMerge(from: ['foo'], into: 'lessons'),
+          () => strict.tagMerge(from: ['foo'], into: 'insights'),
           tool: 'tag_merge',
           messageContains: [
-            '"lessons" looks like a variant of the registered tag "lesson" '
+            '"insights" looks like a variant of the registered tag "insight" '
                 '(same word apart from case, plural or separators). Merge '
-                'into that registered tag instead, or – if "lessons" is '
+                'into that registered tag instead, or – if "insights" is '
                 'genuinely a different label – register it first with '
                 'tag_define (allowSimilar: true), then merge.',
           ],
@@ -1393,10 +1393,10 @@ void main() {
 
       test('strict: without any definition to carry, a variant target '
           'mentions allowSimilar', () async {
-        await define('lesson');
+        await define('insight');
         await open.remember(text: 'b', project: 'family', tags: ['bar']);
         await expectStrictRejection(
-          () => strict.tagMerge(from: ['bar'], into: 'lessons'),
+          () => strict.tagMerge(from: ['bar'], into: 'insights'),
           tool: 'tag_merge',
           messageContains: [
             'register it first with tag_define (allowSimilar: true), then '

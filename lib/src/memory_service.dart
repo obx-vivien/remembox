@@ -34,6 +34,9 @@ part 'memory_service_areas.dart';
 part 'memory_service_facts.dart';
 part 'memory_service_tags.dart';
 part 'memory_service_related.dart';
+part 'memory_service_attributes.dart';
+part 'memory_service_entries.dart';
+part 'memory_service_threads.dart';
 
 /// Invalid tool input (unknown kind, missing entry, ...). The MCP adapter
 /// maps this to an isError tool result with the message verbatim.
@@ -63,6 +66,50 @@ class _ReindexWorkItem {
   final String action;
 
   _ReindexWorkItem(this.entryId, this.text, this.hash, {required this.action});
+}
+
+/// Builds [builder]'s query, runs [fn] on it and always closes it –
+/// short-lived queries must not leak in a long-running process
+/// (how-to-use-objectbox.md §5). The body of [MemoryService._useQuery],
+/// top-level since 0.5.0 so [readThreadRows] (which runs on a bare
+/// [StoreSession], without a service) shares it instead of a copy.
+R _useBuiltQuery<T, R>(QueryBuilder<T> builder, R Function(Query<T> q) fn) {
+  final query = builder.build();
+  try {
+    return fn(query);
+  } finally {
+    query.close();
+  }
+}
+
+/// The paging loop of [MemoryService._pageThrough] (see there for the
+/// rationale), top-level since 0.5.0 for the same reason as
+/// [_useBuiltQuery].
+void _pageQuery<T>(
+  Store store,
+  QueryBuilder<T> builder,
+  void Function(List<T> page) onPage, {
+  int pageSize = MemoryService._scanPageSize,
+}) {
+  // One read transaction around all pages: offset/limit slices are only
+  // a consistent partition of the box if nothing is written between
+  // pages (a deleted row would otherwise shift every later page by one).
+  // Read-in-write nesting reuses the outer transaction, so this is safe
+  // from any caller.
+  _useBuiltQuery(builder, (q) {
+    store.runInTransaction(TxMode.read, () {
+      q.limit = pageSize;
+      var offset = 0;
+      while (true) {
+        q.offset = offset;
+        final page = q.find();
+        if (page.isEmpty) break;
+        onPage(page);
+        if (page.length < pageSize) break;
+        offset += pageSize;
+      }
+    });
+  });
 }
 
 class MemoryService {
@@ -148,6 +195,21 @@ class MemoryService {
       _requireSession('_tagDefs').tagDefinitions;
   Box<TagAlias> get _tagAliases =>
       _requireSession('_tagAliases').tagAliases;
+  // 0.5.0: retired tags.
+  Box<TagRetirement> get _tagRetirements =>
+      _requireSession('_tagRetirements').tagRetirements;
+  // 0.5.0: the attribute value register.
+  Box<AttributeDefinition> get _attrDefs =>
+      _requireSession('_attrDefs').attributeDefinitions;
+  Box<AttributeValue> get _attrValues =>
+      _requireSession('_attrValues').attributeValues;
+  // 0.5.0: threads.
+  Box<Thread> get _threads => _requireSession('_threads').threads;
+  Box<ThreadState> get _threadStates =>
+      _requireSession('_threadStates').threadStates;
+  Box<ThreadEntry> get _threadEntries =>
+      _requireSession('_threadEntries').threadEntries;
+  Box<ThreadOp> get _threadOps => _requireSession('_threadOps').threadOps;
 
   /// Runs [body] inside exactly one [gate.withStore] lending, setting
   /// [_currentSession] for its duration so the getters above resolve. This
@@ -269,7 +331,7 @@ class MemoryService {
         'are probably an older state of what you just wrote – use '
         '`supersede` for prose or `fact_set` for an exact value (the old '
         'entry stays as history). For the others consider `link` (related, '
-        'derivedFrom, contradicts, parent/child).',
+        'derivedFrom, contradicts, partOf – A belongs to B).',
       );
     }
     if (hasWeak) {
@@ -346,14 +408,8 @@ class MemoryService {
   /// Runs [fn] on a freshly built query and always closes it — short-lived
   /// queries must not leak in a long-running process
   /// (how-to-use-objectbox.md §5).
-  R _useQuery<T, R>(QueryBuilder<T> builder, R Function(Query<T> q) fn) {
-    final query = builder.build();
-    try {
-      return fn(query);
-    } finally {
-      query.close();
-    }
-  }
+  R _useQuery<T, R>(QueryBuilder<T> builder, R Function(Query<T> q) fn) =>
+      _useBuiltQuery(builder, fn);
 
   /// Default page size for [_pageThrough] — small enough to bound memory
   /// well below a box-wide `getAll()`, large enough to keep the number of
@@ -386,25 +442,7 @@ class MemoryService {
     void Function(List<T> page) onPage, {
     int pageSize = _scanPageSize,
   }) {
-    // One read transaction around all pages: offset/limit slices are only
-    // a consistent partition of the box if nothing is written between
-    // pages (a deleted row would otherwise shift every later page by one).
-    // Read-in-write nesting reuses the outer transaction, so this is safe
-    // from any caller.
-    _useQuery(builder, (q) {
-      store.runInTransaction(TxMode.read, () {
-        q.limit = pageSize;
-        var offset = 0;
-        while (true) {
-          q.offset = offset;
-          final page = q.find();
-          if (page.isEmpty) break;
-          onPage(page);
-          if (page.length < pageSize) break;
-          offset += pageSize;
-        }
-      });
-    });
+    _pageQuery(store, builder, onPage, pageSize: pageSize);
   }
 
   /// Whitespace-normalized text used for hashing (dedup must not depend on
@@ -454,9 +492,16 @@ class MemoryService {
 
   static void _requireKind(String kind) {
     if (!MemoryKind.isValid(kind)) {
+      // 0.5.0: a kind written in the wrong case ("deadend", "Lesson") gets
+      // the exact spelling suggested – kinds are case-sensitive.
+      final lower = kind.toLowerCase();
+      final suggestion = MemoryKind.all
+          .where((k) => k.toLowerCase() == lower)
+          .firstOrNull;
       throw ValidationException(
         'Unknown kind "${_truncateForError(kind)}". Valid kinds: '
-        '${MemoryKind.all.join(', ')}.',
+        '${MemoryKind.all.join(', ')}.'
+        '${suggestion == null ? '' : ' Did you mean "$suggestion"?'}',
       );
     }
   }
@@ -875,6 +920,9 @@ class MemoryService {
     // inherited from it, so the rejection message can say so.
     String registryTool = 'remember',
     int? projectInheritedFrom,
+    // 0.5.0: attach the entry (also an existing duplicate) to this thread,
+    // in the same write transaction.
+    int? threadId,
   }) async {
     _requireKind(kind);
     _requireSourceType(sourceType);
@@ -893,7 +941,7 @@ class MemoryService {
       docMimeType: docMimeType,
       docContentHash: docContentHash,
     );
-    _requireLinkSpecs(links);
+    _requireLinkSpecs(links, tool: registryTool);
     final normalized = normalizeText(text);
     if (normalized.isEmpty) {
       throw ValidationException('Cannot remember empty text.');
@@ -948,6 +996,8 @@ class MemoryService {
     // dispatch just below stays untouched.
     final registryWarnings = <String>[];
     final createdLinks = <Map<String, Object?>>[];
+    Map<String, Object?>? threadResult;
+    String? threadWarning;
     final Object txResult = await _withSession('remember-entry', () {
       return store.runInTransaction(TxMode.write, () {
         // Link targets are checked before the dedup lookup so a bad
@@ -956,6 +1006,10 @@ class MemoryService {
         for (final l in links) {
           _requireEntry(l.toId, what: 'Link target');
         }
+        // 0.5.0: same for the thread – checked before anything is written.
+        final thread = threadId == null
+            ? null
+            : _requireThread(threadId, tool: registryTool);
         // Strict registry mode: the project must be registered (and not
         // merged) – checked in THIS write tx, before the dedup lookup and
         // before anything is written, so a rejection also covers the
@@ -981,57 +1035,70 @@ class MemoryService {
           kind: kind,
           tool: registryTool,
         );
-        final existing = _useQuery(
-          _entries.query(MemoryEntry_.contentHash.equals(hash)),
-          (q) => q.findFirst(),
-        );
-        if (existing != null) return existing;
-        if (docName != null || docContentHash != null) {
-          final resolvedDocHash =
-              docContentHash ??
-              contentHashOf('${docName ?? ''}|${docPathOrUrl ?? ''}');
-          entry.source.target = _getOrCreateDoc(
-            name: docName ?? docPathOrUrl ?? 'unnamed document',
-            docContentHash: resolvedDocHash,
-            pathOrUrl: docPathOrUrl ?? '',
-            author: docAuthor ?? '',
-            mimeType: docMimeType ?? '',
-            docCreatedAt: docCreatedAt,
-          );
-        }
-        entry.tags.addAll(prepared.tags.map(_getOrCreateTag));
-        final id = _entries.put(entry);
-        // `links`: same write transaction as the entry, through the one
-        // link-creation helper `link` itself uses. Any failure aborts the
-        // whole transaction (entry included).
-        for (final l in links) {
-          createdLinks.add(
-            _createLinkInTx(id, l.toId, l.type, l.note),
-          );
-        }
-        // 2026-09-21, areas and facts (0.3.0): register the project (or
-        // note it is already registered) and surface a near-duplicate-name
-        // warning, in this SAME write tx – F15 forbids a nested StoreGate
-        // lending, and `_ensureProjectScope`/`_nearDuplicateProjects`
-        // (memory_service_registry.dart) are written to be called from
-        // exactly here. Deliberately NOT reached on the dedup path above
-        // (`existing != null` already returned) – the duplicate-remember
-        // path is unchanged.
-        final ensured = _ensureProjectScope(
-          validatedProject,
+        final put = _putEntryInTx(
+          entry,
+          tags: prepared.tags,
           reason: 'remember',
+          warnings: registryWarnings,
+          resolveDoc: docName != null || docContentHash != null
+              ? () => _getOrCreateDoc(
+                  name: docName ?? docPathOrUrl ?? 'unnamed document',
+                  docContentHash:
+                      docContentHash ??
+                      contentHashOf('${docName ?? ''}|${docPathOrUrl ?? ''}'),
+                  pathOrUrl: docPathOrUrl ?? '',
+                  author: docAuthor ?? '',
+                  mimeType: docMimeType ?? '',
+                  docCreatedAt: docCreatedAt,
+                )
+              : null,
+          // `links`: same write transaction as the entry, through the one
+          // link-creation helper `link` itself uses. Any failure aborts the
+          // whole transaction (entry included).
+          onInserted: (id) {
+            for (final l in links) {
+              createdLinks.add(_createLinkInTx(id, l.toId, l.type, l.note));
+            }
+          },
         );
-        registryWarnings.addAll(ensured.warnings);
-        final dupeProjects = _nearDuplicateProjects(validatedProject);
-        if (dupeProjects.isNotEmpty) {
-          registryWarnings.add(
-            'project "${sanitizeForLog(validatedProject)}" differs from '
-            'existing '
-            '${dupeProjects.map((n) => '"${sanitizeForLog(n)}"').join(', ')} '
-            'only by case/space/-/_; use the existing name or run '
-            'project_merge.',
+        // 0.5.0: attach to the thread – the duplicate path too (attaching
+        // is exactly what thread_update attachEntryIds would do next).
+        // Attachments do not change the thread's version (amendment A3).
+        if (thread != null) {
+          final now = DateTime.now().toUtc();
+          final attached = _attachEntryInTx(
+            thread.id,
+            put.id,
+            via: ThreadVia.remember,
+            now: now,
           );
+          if (attached) {
+            thread.updatedAt = now;
+            _threads.put(thread);
+            log(
+              '[memory] $registryTool attached entry ${put.id} to thread '
+              '${thread.id}',
+            );
+          }
+          final entryProject = put.existing?.project ?? validatedProject;
+          final otherProject = entryProject != thread.project;
+          threadResult = {
+            'id': thread.id,
+            'attached': attached,
+            'version': thread.version,
+            if (otherProject) 'attachedFromOtherProject': [put.id],
+          };
+          if (otherProject) {
+            threadWarning = MemoryServiceThreads._otherProjectAttachWarning(
+              [put.id],
+              thread.project,
+            );
+            log('[memory] $registryTool: $threadWarning');
+          }
         }
+        final existing = put.existing;
+        if (existing != null) return existing;
+        final id = put.id;
         if (prepared.warnings.isNotEmpty) {
           registryWarnings.addAll(prepared.warnings);
           log(
@@ -1058,11 +1125,15 @@ class MemoryService {
         'duplicate': true,
         'contentHash': hash,
         'message': 'Identical text already stored as entry ${txResult.id}.',
-        if (links.isNotEmpty)
-          'warning':
+        'thread': ?threadResult,
+        if (links.isNotEmpty || threadWarning != null)
+          'warning': [
+            if (links.isNotEmpty)
               'The ${links.length} requested link(s) were NOT created: the '
-              'text already exists as entry ${txResult.id}. Use the link '
-              'tool on that id if the links are still wanted.',
+                  'text already exists as entry ${txResult.id}. Use the link '
+                  'tool on that id if the links are still wanted.',
+            ?threadWarning,
+          ].join(' '),
       };
       if (links.isNotEmpty) {
         log(
@@ -1101,7 +1172,7 @@ class MemoryService {
     // above (2026-09-21, areas and facts 0.3.0) – one joined `warning`
     // string, same key remember()'s indexing/expiry warnings already use
     // below, not a second one.
-    final warnings = <String>[...registryWarnings];
+    final warnings = <String>[...registryWarnings, ?threadWarning];
     bool indexed = true;
     List<double>? vector;
     var related = const RelatedSuggestions.none();
@@ -1187,6 +1258,7 @@ class MemoryService {
       'contentHash': hash,
       'indexed': indexed,
       if (createdLinks.isNotEmpty) 'links': createdLinks,
+      'thread': ?threadResult,
       if (related.items.isNotEmpty) '_provenance_note': _provenanceNote,
       if (related.items.isNotEmpty) 'related': related.items,
       if (related.hint != null) 'relatedHint': related.hint,
@@ -1198,6 +1270,61 @@ class MemoryService {
       if (warnings.isNotEmpty) 'warning': warnings.join(' '),
     };
     return _applyGuardPeerWarning(result);
+  }
+
+  /// The one entry-creation path inside a write transaction, shared by
+  /// `remember` and `thread_update`'s `note` (0.5.0, no duplicated
+  /// entry-creation/dedup logic): query-first dedup by
+  /// [MemoryEntry.contentHash] – an existing entry is returned as
+  /// `existing` and nothing is written (contract §3: never the
+  /// Sync-mandated replace) – otherwise the source document
+  /// ([resolveDoc]), the already prepared [tags] and the entry are put,
+  /// [onInserted] runs with the new id (in the same transaction), and the
+  /// entry's project is registered ([_registerProjectInTx], warnings into
+  /// [warnings]). MUST run inside the caller's write transaction and
+  /// lending, after every check that may reject the call.
+  ({MemoryEntry? existing, int id}) _putEntryInTx(
+    MemoryEntry entry, {
+    List<String> tags = const [],
+    SourceDocument Function()? resolveDoc,
+    void Function(int id)? onInserted,
+    required String reason,
+    required List<String> warnings,
+  }) {
+    final existing = _useQuery(
+      _entries.query(MemoryEntry_.contentHash.equals(entry.contentHash)),
+      (q) => q.findFirst(),
+    );
+    if (existing != null) return (existing: existing, id: existing.id);
+    if (resolveDoc != null) entry.source.target = resolveDoc();
+    entry.tags.addAll(tags.map(_getOrCreateTag));
+    final id = _entries.put(entry);
+    onInserted?.call(id);
+    warnings.addAll(_registerProjectInTx(entry.project, reason: reason));
+    return (existing: null, id: id);
+  }
+
+  /// Registers [project] (or notes it is already registered) and returns
+  /// the registry warnings: a merged name ([_ensureProjectScope]) and a
+  /// near-duplicate spelling ([_nearDuplicateProjects]). Runs in the
+  /// caller's write transaction – F15 forbids a nested StoreGate lending.
+  /// Shared by every write that may introduce a project name on an entry
+  /// or a thread (2026-09-21, areas and facts (0.3.0); extracted 0.5.0).
+  List<String> _registerProjectInTx(String project, {required String reason}) {
+    final warnings = <String>[
+      ..._ensureProjectScope(project, reason: reason).warnings,
+    ];
+    final dupeProjects = _nearDuplicateProjects(project);
+    if (dupeProjects.isNotEmpty) {
+      warnings.add(
+        'project "${sanitizeForLog(project)}" differs from '
+        'existing '
+        '${dupeProjects.map((n) => '"${sanitizeForLog(n)}"').join(', ')} '
+        'only by case/space/-/_; use the existing name or run '
+        'project_merge.',
+      );
+    }
+    return warnings;
   }
 
   static String _deriveTitle(String normalized) =>
@@ -1286,6 +1413,8 @@ class MemoryService {
     List<String> tags = const [],
     String? language,
     DateTime? expiresAt,
+    // 0.5.0: attach the new entry to this thread (see [remember]).
+    int? threadId,
   }) async {
     // M-4: fail fast, before the store round-trip below — see
     // [_requireArgLengths]'s doc for why this duplicates none of
@@ -1307,6 +1436,7 @@ class MemoryService {
     final oldDefaults = await _withSession('supersede-read-old', () {
       final old = _requireEntry(oldId);
       return (
+        contentHash: old.contentHash,
         kind: old.kind,
         sourceType: old.sourceType,
         project: old.project,
@@ -1330,6 +1460,14 @@ class MemoryService {
         '$_projectRule',
       );
     }
+    // Identical text: rejected BEFORE remember runs, so nothing (e.g. a
+    // threadId attachment) is written for a call that fails.
+    if (contentHashOf(text) == oldDefaults.contentHash) {
+      throw ValidationException(
+        'supersede would link entry $oldId to itself (the replacement '
+        'text is identical to the existing entry).',
+      );
+    }
     final effectiveProject = project ?? oldDefaults.project;
     // Renamed from the naive `result` (kept from an earlier revision) to
     // `rememberResult` to avoid shadowing confusion with this method's own
@@ -1347,6 +1485,7 @@ class MemoryService {
       excludeFromRelated: {oldId},
       registryTool: 'supersede',
       projectInheritedFrom: project == null ? oldId : null,
+      threadId: threadId,
     );
     final newId = rememberResult['id'] as int;
     if (newId == oldId) {
@@ -1355,13 +1494,44 @@ class MemoryService {
         'text is identical to the existing entry).',
       );
     }
-    await _withSession('supersede-link', () {
-      store.runInTransaction(TxMode.write, () {
+    final threadsCarried = await _withSession('supersede-link', () {
+      return store.runInTransaction(TxMode.write, () {
         final fresh = _requireEntry(oldId);
         fresh.supersededBy.targetId = newId;
         _entries.put(fresh);
+        // 0.5.0: the new entry joins every thread the old one belongs to
+        // (deterministic evidence, not similarity); the old one stays
+        // attached as history. Query-first per thread.
+        final now = DateTime.now().toUtc();
+        final carried = <int>[];
+        final oldLinks = _useQuery(
+          _threadEntries.query(ThreadEntry_.entry.equals(oldId)),
+          (q) => q.find(),
+        );
+        for (final link in oldLinks) {
+          final tid = link.thread.targetId;
+          if (tid == 0) {
+            log(
+              '[memory] WARN: supersede: attachment ${link.id} of entry '
+              '$oldId points at no thread (thread id 0) – not carried',
+            );
+            continue;
+          }
+          if (_attachEntryInTx(tid, newId, via: ThreadVia.supersede, now: now)) {
+            carried.add(tid);
+          }
+        }
+        _touchThreads(carried, now);
+        return carried;
       });
     });
+    if (threadsCarried.isNotEmpty) {
+      log(
+        '[memory] supersede carried ${threadsCarried.length} thread '
+        'attachment(s) from entry $oldId to $newId (threads '
+        '${threadsCarried.join(', ')})',
+      );
+    }
     log(
       '[memory] entry $oldId superseded by $newId'
       '${rememberResult['duplicate'] == true ? ' (existing entry, deduped)' : ''}',
@@ -1376,6 +1546,8 @@ class MemoryService {
       'oldId': oldId,
       'newId': newId,
       'newEntryWasDuplicate': rememberResult['duplicate'],
+      if (rememberResult['thread'] != null) 'thread': rememberResult['thread'],
+      if (threadsCarried.isNotEmpty) 'threadsCarried': threadsCarried,
       if (rememberResult['related'] != null) ...{
         '_provenance_note': rememberResult['_provenance_note'],
         'related': rememberResult['related'],
@@ -1723,6 +1895,10 @@ class MemoryService {
         'linkId': link.id,
         'direction': isOut ? 'out' : 'in',
         'type': link.linkType,
+        // 0.5.0: the link as this entry reads it ("partOf" outgoing,
+        // "hasPart" incoming, ...) – see [LinkType.relationFrom]. Reads
+        // only; write results keep their shape.
+        'relation': LinkType.relationFrom(link.linkType, outgoing: isOut),
         if (link.note.isNotEmpty) 'note': link.note,
         'otherId': otherId,
         'otherTitle': other?.title,
@@ -1842,6 +2018,7 @@ class MemoryService {
     late final int linksRemoved;
     late final int tagLinks;
     late final int factLinksCleared;
+    late final int threadEntriesRemoved;
     store.runInTransaction(TxMode.write, () {
       tagLinks = entry.tags.length;
       entry.tags.clear();
@@ -1881,12 +2058,26 @@ class MemoryService {
         _facts.put(f);
       }
       factLinksCleared = factsPointingHere.length;
+      // 0.5.0: thread attachments of this entry – removed (counted), and
+      // each affected thread's updatedAt set (changed membership; not a
+      // version change, amendment A3).
+      final threadLinks = _useQuery(
+        _threadEntries.query(ThreadEntry_.entry.equals(id)),
+        (q) => q.find(),
+      );
+      _threadEntries.removeMany([for (final l in threadLinks) l.id]);
+      _touchThreads(
+        [for (final l in threadLinks) l.thread.targetId],
+        DateTime.now().toUtc(),
+      );
+      threadEntriesRemoved = threadLinks.length;
       _entries.remove(id);
     });
     log(
       '[memory] hard-deleted entry $id '
       '(indexRows=$indexRowsRemoved, links=$linksRemoved, '
-      'tagLinks=$tagLinks, factLinksCleared=$factLinksCleared)',
+      'tagLinks=$tagLinks, factLinksCleared=$factLinksCleared, '
+      'threadEntries=$threadEntriesRemoved)',
     );
     final result = {
       'id': id,
@@ -1895,17 +2086,34 @@ class MemoryService {
       'memoryLinksRemoved': linksRemoved,
       'tagLinksRemoved': tagLinks,
       'factLinksCleared': factLinksCleared,
+      'threadEntriesRemoved': threadEntriesRemoved,
     };
     return _applyGuardPeerWarning(result);
   });
 
-  /// Pure field validation shared by [link] and `remember`'s `links`
-  /// argument ([_requireLinkSpecs]): the link type and the note length.
-  void _requireLinkFields(String type, String note) {
+  /// Field validation shared by [link] and `remember`'s `links` argument
+  /// ([_requireLinkSpecs]): the link type and the note length. No store
+  /// access, so callers run it before anything is written.
+  ///
+  /// Strict registry mode (0.5.0): a legacy type ([LinkType.legacy] –
+  /// `parent`/`child`, direction undefined) is rejected via
+  /// `_rejectStrict` (one `[registry] strict:` log line naming [tool]).
+  /// Open mode keeps accepting them.
+  void _requireLinkFields(String type, String note, {required String tool}) {
     if (!LinkType.isValid(type)) {
       throw ValidationException(
         'Unknown link type "${_truncateForError(type)}". Valid types: '
         '${LinkType.all.join(', ')}.',
+      );
+    }
+    if (registryMode == RegistryMode.strict && LinkType.legacy.contains(type)) {
+      _rejectStrict(
+        tool,
+        'link type "$type" is not accepted in strict registry mode: its '
+        'direction is undefined. Use partOf (A belongs to B): '
+        'link(fromId: <the part>, toId: <the whole>, type: "partOf"); a '
+        'continuation is supersede, "follows from" is derivedFrom. Nothing '
+        'was written.',
       );
     }
     // M-4: the one caller-supplied string field a link has, outside of
@@ -1936,6 +2144,28 @@ class MemoryService {
     }
     _requireEntry(fromId, what: 'Link source');
     _requireEntry(toId, what: 'Link target');
+    // 0.5.0: partOf in both directions would make each entry a part of
+    // the other – rejected in both registry modes. Only the exact reverse
+    // edge is checked (no cycle search over longer chains).
+    if (type == LinkType.partOf) {
+      final reverse = _useQuery(
+        _links.query(
+          MemoryLink_.from
+              .equals(toId)
+              .and(MemoryLink_.to.equals(fromId))
+              .and(MemoryLink_.linkType.equals(LinkType.partOf)),
+        ),
+        (q) => q.count(),
+      );
+      if (reverse > 0) {
+        final message =
+            'Entry $toId is already partOf entry $fromId – partOf in both '
+            'directions would make each part of the other. Nothing was '
+            'written.';
+        log('[memory] link $fromId -(partOf)-> $toId rejected: $message');
+        throw ValidationException(message);
+      }
+    }
     final existing = _useQuery(
       _links.query(
         MemoryLink_.from
@@ -1979,7 +2209,7 @@ class MemoryService {
     String type, {
     String note = '',
   }) => _withSession('link', () {
-    _requireLinkFields(type, note);
+    _requireLinkFields(type, note, tool: 'link');
     // The guard.peersPresent() check + _appendGuardWarning is applied AFTER
     // the transaction below returns (not inside it): peersPresent() runs an
     // OS-level probe (pgrep/lock check), which has no business running while
@@ -2021,8 +2251,13 @@ class MemoryService {
     String? project,
     // 2026-09-21, areas and facts (0.3.0).
     String? area,
+    // 0.5.0: one of [MemoryKind.all]. An index condition (kind is
+    // @Index()), applied before the limit – unlike recall's kind filter,
+    // which runs after the ANN search and can return fewer than k hits.
+    String? kind,
   }) => _withSession('listRecent', () {
     if (n <= 0) throw ValidationException('n must be >= 1.');
+    if (kind != null) _requireKind(kind);
     Condition<MemoryEntry>? condition;
     if (area != null) {
       // _resolveAreaProjects throws ValidationException for an unknown
@@ -2056,6 +2291,10 @@ class MemoryService {
         caseSensitive: true,
       );
       condition = condition == null ? projectCondition : condition & projectCondition;
+    }
+    if (kind != null) {
+      final kindCondition = MemoryEntry_.kind.equals(kind, caseSensitive: true);
+      condition = condition == null ? kindCondition : condition & kindCondition;
     }
     // Ordered query with limit — the DB does the sorting and slicing, no
     // getAll()+sort in memory (how-to-use-objectbox.md §5).
@@ -2202,7 +2441,10 @@ class MemoryService {
       // (review minor 9) `_pageThrough` rather than a bare `.find()` on
       // the registry tables too, matching what `areasList` already does
       // for the same tables.
-      final projectValues = _distinctUsedProjects(includeFacts: false);
+      final projectValues = _distinctUsedProjects(
+        includeFacts: false,
+        includeThreads: false,
+      );
       final byProject = <String, int>{
         for (final p in projectValues)
           p: countWhere(MemoryEntry_.project.equals(p, caseSensitive: true)),
@@ -2275,6 +2517,10 @@ class MemoryService {
         'tagDefinitions': _tagDefs.count(),
         // Alternative names of registered tags (TagAlias rows).
         'tagAliases': _tagAliases.count(),
+        // 0.5.0: retired tag names (TagRetirement rows, aliases included).
+        'tagRetirements': _tagRetirements.count(),
+        // 0.5.0: registered fact attributes (AttributeDefinition rows).
+        'attributeDefinitions': _attrDefs.count(),
       };
 
       // "Current" per the addendum's definition: open-ended, not
@@ -2352,6 +2598,25 @@ class MemoryService {
         'byArea': byArea,
         'registry': registry,
         'facts': facts,
+        // 0.5.0: counts only, one count() per state.
+        'threads': {
+          'total': _threads.count(),
+          'live': _useQuery(
+            _threads.query(_threadLiveCondition()),
+            (q) => q.count(),
+          ),
+          'byState': {
+            for (final state in ThreadStates.all)
+              state: _useQuery(
+                _threads.query(
+                  Thread_.state.equals(state, caseSensitive: true),
+                ),
+                (q) => q.count(),
+              ),
+          },
+          'threadEntries': _threadEntries.count(),
+          'idempotencyRows': _threadOps.count(),
+        },
       };
     });
   });

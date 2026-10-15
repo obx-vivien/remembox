@@ -141,7 +141,7 @@
       "newEntryWasDuplicate": false
     },
     "log": [
-      "[memory] created tag \"lesson\" (id 9)",
+      "[memory] created tag \"todo\" (id 9)",
       "[memory] related for entry 4: 0 shown, 0 more, of 4 ANN candidate(s); dropped: other model 0, stale/orphaned 0, expired 0, superseded 0, excluded 1, below 0.86 2",
       "[memory] remembered entry 4 (kind=fact, project=\"garden\", tags=2, hash=461a799046aa…)",
       "[memory] entry 1 superseded by 4"
@@ -552,7 +552,7 @@
           "count": 1
         },
         {
-          "name": "lesson",
+          "name": "todo",
           "count": 0
         }
       ],
@@ -745,7 +745,7 @@
           "project": "garden",
           "tags": [
             "contact",
-            "lesson"
+            "todo"
           ],
           "supersededBy": 5,
           "source": 0
@@ -785,8 +785,8 @@
         "contact",
         "decisions",
         "episodes",
-        "lesson",
-        "status"
+        "status",
+        "todo"
       ],
       "projects": [
         {

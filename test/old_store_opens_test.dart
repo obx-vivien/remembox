@@ -12,7 +12,8 @@
 /// ("opening an existing store with additional entities is a silent
 /// additive schema update") – pinned instead of assumed. The same is
 /// pinned for a 0.3.1-model store (9 entities, before `TagDefinition` and
-/// `TagAlias`).
+/// `TagAlias`) and a 0.4.0-model store (11 entities, before
+/// `TagRetirement`, `AttributeDefinition` and `AttributeValue`).
 library;
 
 import 'dart:convert';
@@ -45,6 +46,15 @@ const _entityNames031 = {
   'AreaMembership',
   'Fact',
   'ProjectScope',
+};
+
+/// The 11 entity names of the 0.4.0 model
+/// (test/fixtures/objectbox-model-0.4.0.json): the 0.3.1 nine plus the tag
+/// register – everything before the 0.5.0 entities.
+const _entityNames040 = {
+  ..._entityNames031,
+  'TagDefinition',
+  'TagAlias',
 };
 
 /// Reads the exact `last*Id` counters from a frozen model fixture (single
@@ -337,6 +347,145 @@ void main() {
         TagAlias(name: 'chores', tag: 'housework'),
       );
       expect(newStore.box<TagAlias>().get(aliasId)!.tag, 'housework');
+    },
+  );
+
+  test(
+    'a store built with the 0.4.0 (11-entity) model opens with the current '
+    'model, keeps every row, and the TagRetirement, AttributeDefinition, '
+    'AttributeValue and thread boxes are immediately usable',
+    () {
+      ensureNativeLibraryLoaded();
+      final oldStore = Store(
+        _filteredModelDefinition(
+          _entityNames040,
+          'test/fixtures/objectbox-model-0.4.0.json',
+        ),
+        directory: tempDir.path,
+      );
+      final oldSyncClient = startLocalActivationSyncClient(oldStore);
+
+      late int entryId;
+      oldStore.runInTransaction(TxMode.write, () {
+        final tag = Tag(name: 'housework');
+        final entry = MemoryEntry(
+          title: '0.4.0-era entry',
+          text: 'synthetic body written under the 0.4.0 model',
+          kind: MemoryKind.episode,
+          sourceType: MemorySource.note,
+          project: 'garden',
+          contentHash: 'store-040-entry-hash',
+        );
+        entry.tags.add(tag);
+        entryId = oldStore.box<MemoryEntry>().put(entry);
+        oldStore.box<ProjectScope>().put(
+          ProjectScope(
+            name: 'garden',
+            nameKey: ScopeKey.of('garden'),
+            description: 'Vegetable beds and fruit trees.',
+          ),
+        );
+        oldStore.box<TagDefinition>().put(
+          TagDefinition(name: 'housework', description: 'Chores at home.'),
+        );
+        oldStore.box<TagAlias>().put(
+          TagAlias(name: 'chores', tag: 'housework'),
+        );
+        oldStore.box<Fact>().put(
+          Fact(
+            project: 'garden',
+            subject: 'Bed 1',
+            attribute: 'state',
+            factKey: Fact.keyFor('garden', 'Bed 1', 'state'),
+            valueType: FactValueType.text,
+            valueText: 'planted',
+            sourceType: MemorySource.note,
+          ),
+        );
+      });
+
+      oldSyncClient.close();
+      oldStore.close();
+
+      final newStore = openMemoryStore(tempDir.path);
+      final newSyncClient = startLocalActivationSyncClient(newStore);
+      addTearDown(() {
+        newSyncClient.close();
+        newStore.close();
+      });
+
+      expect(newStore.box<MemoryEntry>().count(), 1);
+      expect(newStore.box<Tag>().count(), 1);
+      expect(newStore.box<ProjectScope>().count(), 1);
+      expect(newStore.box<TagDefinition>().count(), 1);
+      expect(newStore.box<TagAlias>().count(), 1);
+      expect(newStore.box<Fact>().count(), 1);
+      final entry = newStore.box<MemoryEntry>().get(entryId)!;
+      expect(entry.contentHash, 'store-040-entry-hash');
+      expect(entry.kind, MemoryKind.episode);
+      expect(entry.tags.map((t) => t.name), ['housework']);
+      expect(
+        newStore.box<TagAlias>().getAll().single.tag,
+        'housework',
+      );
+
+      expect(newStore.box<TagRetirement>().count(), 0);
+      final retirementId = newStore.box<TagRetirement>().put(
+        TagRetirement(name: 'chores', hint: 'Use the tag housework.'),
+      );
+      expect(newStore.box<TagRetirement>().get(retirementId)!.aliasOf, '');
+      expect(newStore.box<AttributeDefinition>().count(), 0);
+      final defId = newStore.box<AttributeDefinition>().put(
+        AttributeDefinition(name: 'state', description: 'Where it stands.'),
+      );
+      expect(newStore.box<AttributeDefinition>().get(defId)!.name, 'state');
+      expect(newStore.box<AttributeValue>().count(), 0);
+      final valueId = newStore.box<AttributeValue>().put(
+        AttributeValue(
+          key: AttributeValue.keyFor('state', 'planted'),
+          attribute: 'state',
+          value: 'planted',
+        ),
+      );
+      expect(newStore.box<AttributeValue>().get(valueId)!.value, 'planted');
+
+      // 0.5.0 threads: the four thread boxes are empty and usable,
+      // including the ToOne relations to Thread and to a 0.4.0-era entry.
+      expect(newStore.box<Thread>().count(), 0);
+      final now = DateTime.now().toUtc();
+      final threadId = newStore.box<Thread>().put(
+        Thread(
+          title: 'Bed 1 planting',
+          titleKey: ScopeKey.of('Bed 1 planting'),
+          project: 'garden',
+          state: ThreadStates.inProgress,
+          stateRecordedAt: now,
+        ),
+      );
+      final stateRow = ThreadState(
+        state: ThreadStates.inProgress,
+        recordedAt: now,
+      )..thread.targetId = threadId;
+      final stateRowId = newStore.box<ThreadState>().put(stateRow);
+      expect(
+        newStore.box<ThreadState>().get(stateRowId)!.thread.targetId,
+        threadId,
+      );
+      final link = ThreadEntry(via: ThreadVia.attach)
+        ..thread.targetId = threadId
+        ..entry.targetId = entryId;
+      final linkId = newStore.box<ThreadEntry>().put(link);
+      expect(newStore.box<ThreadEntry>().get(linkId)!.entry.targetId, entryId);
+      final opId = newStore.box<ThreadOp>().put(
+        ThreadOp(
+          key: 'retry-1',
+          threadId: threadId,
+          version: 1,
+          argsHash: 'hash',
+          resultJson: '{}',
+        ),
+      );
+      expect(newStore.box<ThreadOp>().get(opId)!.threadId, threadId);
     },
   );
 

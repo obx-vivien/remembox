@@ -440,4 +440,106 @@ void main() {
       await stderrSub.cancel();
     },
   );
+
+  // 0.5.0: `remembox cockpit-sync` is dispatched before any server work.
+  // Every run points OBX_MEMORY_DIR, OBX_MEMORY_COCKPIT_FILE and
+  // OBX_MEMORY_COCKPIT_LOG at temp paths (Process.run merges the parent
+  // environment, so they are set explicitly – never the operator's).
+  group('cockpit-sync subcommand', () {
+    late Directory tempDir;
+    late Map<String, String> env;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('remembox_main_cockpit_');
+      env = {
+        'OBX_MEMORY_DIR': p.join(tempDir.path, 'store'),
+        'OBX_MEMORY_COCKPIT_FILE': '',
+        'OBX_MEMORY_COCKPIT_LOG': p.join(tempDir.path, 'compare.log'),
+        'OBX_LOG_LEVEL': 'error',
+      };
+    });
+
+    tearDown(() => tempDir.deleteSync(recursive: true));
+
+    Future<ProcessResult> cockpitSync(List<String> args) => Process.run(
+      Platform.resolvedExecutable,
+      ['run', 'bin/remembox.dart', 'cockpit-sync', ...args],
+      environment: env,
+    );
+
+    test('without a cockpit file: non-zero exit and a message', () async {
+      final r = await cockpitSync(const []);
+      expect(r.exitCode, isNot(0));
+      expect(r.stderr.toString(), contains('no cockpit file'));
+      expect(Directory(p.join(tempDir.path, 'store')).existsSync(), isFalse);
+    });
+
+    test('--parse-only on the template: exit 0 and the parsed lines as JSON '
+        'on stdout', () async {
+      final r = await cockpitSync([
+        '--parse-only',
+        '--cockpit',
+        'templates/cockpit.md',
+      ]);
+      expect(r.exitCode, 0, reason: '${r.stderr}');
+      final json = jsonDecode(r.stdout.toString().trim()) as Map;
+      expect(json['parsed'], 13);
+      expect(json['unparsed'], 0);
+    });
+
+    test('against a store and a template copy: exit 0, the generated '
+        'section appended between the markers', () async {
+      final storeDir = p.join(tempDir.path, 'store');
+      // An empty but real store (data.mdb) – opened and closed in this
+      // process before the subprocess runs.
+      final seeded = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'test/helpers/count_entries_worker.dart',
+        storeDir,
+      ]);
+      expect(seeded.exitCode, 0, reason: '${seeded.stderr}');
+      final copy = File(p.join(tempDir.path, 'cockpit.md'))
+        ..writeAsStringSync(File('templates/cockpit.md').readAsStringSync());
+      final r = await cockpitSync(['--cockpit', copy.path]);
+      expect(r.exitCode, 0, reason: '${r.stderr}');
+      final text = copy.readAsStringSync();
+      expect(text, contains('<!-- remembox:threads:start -->'));
+      expect(text, contains('<!-- remembox:threads:end -->'));
+      expect(r.stderr.toString(), contains('[cockpit] parsed=13'));
+    });
+
+    test('next to a persistent-mode holder of store.lock: exit 1 after the '
+        'startup probe, the process does not hang', () async {
+      final storeDir = p.join(tempDir.path, 'store');
+      final holder = await Process.start(Platform.resolvedExecutable, [
+        'run',
+        'test/helpers/hold_store_lock.dart',
+        storeDir,
+      ]);
+      addTearDown(() async {
+        await holder.stdin.close();
+        await holder.exitCode.timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            holder.kill(ProcessSignal.sigkill);
+            return -1;
+          },
+        );
+      });
+      await holder.stdout
+          .transform(utf8.decoder)
+          .firstWhere((chunk) => chunk.contains('LOCK_HELD'));
+      final copy = File(p.join(tempDir.path, 'cockpit.md'))
+        ..writeAsStringSync('# Cockpit\n');
+      final watch = Stopwatch()..start();
+      final r = await cockpitSync([
+        '--cockpit',
+        copy.path,
+      ]).timeout(const Duration(seconds: 60));
+      expect(r.exitCode, 1, reason: '${r.stderr}');
+      expect(watch.elapsed, lessThan(const Duration(seconds: 40)));
+      expect(r.stderr.toString(), contains('could not read the store'));
+      expect(copy.readAsStringSync(), '# Cockpit\n');
+    });
+  });
 }
